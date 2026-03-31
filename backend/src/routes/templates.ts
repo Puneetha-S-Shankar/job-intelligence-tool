@@ -59,27 +59,39 @@ router.post('/email', async (req: Request, res: Response) => {
 router.post('/call-script', async (req: Request, res: Response) => {
   const { jobId } = req.body as { jobId: string }
 
-  if (!jobId) return res.status(400).json({ error: 'jobId is required' })
+  if (!jobId) {
+    return res.status(400).json({ error: 'jobId is required' })
+  }
 
   const { data: job, error } = await supabase
     .from('jobs')
-    .select('title, company, schools')
+    .select('title, company')
     .eq('id', jobId)
     .single()
 
-  if (error || !job) return res.status(404).json({ error: 'Job not found' })
+  if (error || !job) {
+    return res.status(404).json({ error: 'Job not found' })
+  }
 
-  const courses: string[] = (job as { schools?: string[] }).schools ?? []
+  const { data: mappings } = await supabase
+    .from('job_course_mappings')
+    .select('school_code')
+    .eq('job_id', jobId)
+
+  const courses = mappings?.map((m) => m.school_code) ?? []
 
   try {
     const result = await generateCallScript(
-      (job as { company: string }).company,
-      (job as { title: string }).title,
+      job.company,
+      job.title,
       courses
     )
+
     return res.json(result)
   } catch (err) {
-    return res.status(502).json({ error: 'AI generation failed: ' + (err as Error).message })
+    return res.status(502).json({
+      error: 'AI generation failed: ' + (err as Error).message
+    })
   }
 })
 

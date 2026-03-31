@@ -33,7 +33,7 @@ job-intelligence-tool/
 │       ├── pages/
 │       │   ├── DailyDigest.tsx     # / — top 30 fresher-friendly jobs
 │       │   ├── SearchJobs.tsx      # /search — filtered, paginated job search
-│       │   ├── JobDetail.tsx       # /jobs/:id — full job detail
+│       │   ├── JobDetail.tsx       # /jobs/:id — 2-col detail: header, placement intelligence, contacts, AI actions
 │       │   ├── OfficerDashboard.tsx # /officer — assigned jobs + status updater
 │       │   ├── DirectorDashboard.tsx # /director — KPIs, charts, admin actions
 │       │   └── Login.tsx           # /login — sign-in screen
@@ -760,24 +760,88 @@ Reusable card for displaying a single job. Used by `DailyDigest` and `SearchJobs
 ### `src/pages/JobDetail.tsx` — route `/jobs/:id`
 
 **API calls:**
-- `useJob(id)` → `GET /api/jobs/:id` — fetches full job including `course_mappings`, `contacts`, and `company_stats`
-- `POST /api/distributions/send` via `useMutation` in the send-to-officer modal
 
-**Layout (3-column on large screens):**
+| Hook / Mutation | Endpoint | When triggered |
+|-----------------|----------|----------------|
+| `useJob(id)` | `GET /api/jobs/:id` | On mount; re-runs when `id` changes |
+| `useMutation` — `SendModal` | `POST /api/distributions/send` | "Send to Officer" button |
+| `useMutation` — `DraftEmailModal` | `POST /api/templates/email` — body `{ jobId, officerId }` | "Generate Email" inside modal |
+| `useMutation` — `CallScriptModal` | `POST /api/templates/call-script` — body `{ jobId }` | "Generate Script" inside modal |
 
-Left 2/3:
-- Job title, company, score badge
-- Tag chips: location, job type, salary, fresher-friendly, experience required
-- Red flag alert box (if `has_red_flags`)
-- View Original Posting link + Send to Officer button
-- Description (full text)
-- Skills chips
-- Relevant Schools section (`SchoolBadges` component with code, name, confidence %)
+The response shape consumed is the flat `JobDetail` wire type — **no nested `job` object**:
+```
+{ id, title, company, location, job_type, experience_required,
+  salary_min, salary_max, description, skills, conversion_score,
+  is_fresher_friendly, has_red_flags, red_flags, source_url,
+  posted_date, course_mappings[], contacts[], company_stats }
+```
 
-Right 1/3:
-- Company Stats card (distributed, contacted, interviews, offers, conversion %)
-- Contacts card (name, role, email, verified badge)
-- Details card (posted date, source, enriched status)
+**Responsive layout:**
+- Desktop (`lg`): two columns — left `2/3` + right `1/3`
+- Mobile: single stacked column + fixed bottom action bar
+
+---
+
+**Left column**
+
+**1. Header card**
+- Company name + **Tier badge** (A / B / C) derived from `company_stats.conversion_rate`:
+  - Tier A → `conversion_rate ≥ 25%` (green)
+  - Tier B → `conversion_rate ≥ 10%` (blue)
+  - Tier C → `< 10%` (grey)
+  - Badge only rendered when `company_stats` is non-null
+- Job title (`h1`)
+- Meta chips: location, job type, experience required, posted date
+- "View original" link from `source_url` (opens in new tab)
+
+**2. Placement Intelligence card** (teal `#0F766E` gradient background)
+- `conversion_score` displayed as `XX%` large number
+- 5-star rating computed from score: `≥80` → 5, `≥60` → 4, `≥40` → 3, else → 2
+- Likelihood label: `≥80` → "High Likelihood", `≥60` → "Good Chance", `≥40` → "Moderate Fit", `<40` → "Low Likelihood"
+- **Fresher Friendly** badge (green pill) — shown when `is_fresher_friendly = true`
+- **Has Red Flags** badge (red pill) — shown when `has_red_flags = true`
+- Red flag chips — each string in `red_flags[]` rendered as an individual pill tag
+- **School mapping badges** from `course_mappings[]`: format `<school_code> <confidence%>` (e.g. `SoCSE 92%`); tooltip shows `reasoning`
+- Fallback text if `course_mappings` is empty: "School mappings will appear after AI enrichment."
+
+**3. Job details card**
+- Salary range formatted: `₹X.XL – ₹X.XL` (uses `salary_min` / `salary_max`)
+- Skills chips from `skills[]`
+- Full job description with **expand / collapse** toggle at 600-character threshold
+
+---
+
+**Right column**
+
+**4. Contact Information** (uses `contacts[]` from API response)
+
+Each contact rendered in a `ContactCard` showing:
+- Name + role
+- Confidence badge: `is_verified = true` → `100%` green + **Verified** pill; `false` → `50%` grey
+- Email as `mailto:` link
+- Phone as `tel:` link (if present)
+- LinkedIn as external link (if present)
+
+Empty state when `contacts.length === 0`:
+> "Extracting contacts… check back soon"
+
+**5. Action buttons** (sticky on desktop via `lg:sticky lg:top-6`)
+
+| Button | Behaviour |
+|--------|-----------|
+| **Draft Email** | Opens `DraftEmailModal` — prompts for officer UUID, POSTs `{ jobId, officerId }` to `/api/templates/email`, displays AI-generated subject + body, copy-to-clipboard |
+| **Call Script** | Opens `CallScriptModal` — POSTs `{ jobId }` to `/api/templates/call-script`, displays formatted AI script, copy-to-clipboard |
+| **Send to Officer** | Opens `SendModal` — accepts comma-separated officer UUIDs + optional note, POSTs to `/api/distributions/send` |
+| **Save** | Local toggle — fills bookmark icon; no backend call |
+| **Skip** | Calls `navigate(-1)` |
+
+Company track record card renders beneath the action buttons when `company_stats` is present (distributed, contacted, interviews, offers, conversion rate with colour coding).
+
+**Mobile bottom bar** (fixed, `lg:hidden`): compact Email / Call Script / Send / Save buttons that open the same modals.
+
+**States:**
+- **Loading**: full-page animated pulse skeleton matching the two-column layout
+- **Error / not found**: centred card with error message and "Back to Daily Digest" link
 
 ---
 
@@ -842,6 +906,6 @@ Standalone full-page login screen (does not render `Layout`).
 | `/login` | `Login` | Sign-in screen (no layout) |
 | `/` | `DailyDigest` | Today's top fresher-friendly jobs |
 | `/search` | `SearchJobs` | Filtered, paginated job search |
-| `/jobs/:id` | `JobDetail` | Full job detail + contacts + company stats |
+| `/jobs/:id` | `JobDetail` | Full job detail — placement intelligence, contacts, Draft Email / Call Script / Send to Officer actions |
 | `/officer` | `OfficerDashboard` | Officer's assigned jobs + status updater |
 | `/director` | `DirectorDashboard` | Director KPIs, charts, admin actions |
