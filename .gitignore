@@ -16,6 +16,7 @@ build/
 
 # Vite
 frontend/.vite/
+frontend/.env
 
 # TypeScript
 *.tsbuildinfo

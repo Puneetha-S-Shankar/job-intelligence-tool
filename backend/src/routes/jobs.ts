@@ -1,26 +1,234 @@
 import { Router } from 'express'
-import { supabase } from '../lib/supabase'
+import type { Request, Response } from 'express'
+import { supabase } from '../db/supabase'
+import type { Job } from '../types'
 
-export const jobsRouter = Router()
+const router = Router()
 
-jobsRouter.get('/', async (_req, res) => {
-  const { data, error } = await supabase
-    .from('jobs')
-    .select('*')
-    .order('posted_at', { ascending: false })
-    .limit(50)
+// ---------------------------------------------------------------------------
+// GET /api/jobs/daily-digest
+// Top 30 active fresher-friendly jobs, sorted by score.
+// Mappings fetched via FK join; contacts fetched separately (no FK to jobs).
+// ---------------------------------------------------------------------------
+router.get('/daily-digest', async (_req: Request, res: Response) => {
+  try {
+    const { data: jobs, error: jobsError } = await supabase
+      .from('jobs')
+      .select('*, job_course_mappings(*)')
+      .eq('is_active', true)
+      .eq('is_fresher_friendly', true)
+      .order('conversion_score', { ascending: false })
+      .limit(30)
 
-  if (error) return res.status(500).json({ error: error.message })
-  return res.json(data)
+    if (jobsError) throw jobsError
+    if (!jobs?.length) return res.json({ jobs: [], count: 0 })
+
+    // Batch-fetch all company contacts for the returned jobs in one query
+    const companies = [...new Set(jobs.map((j) => j.company as string))]
+    const { data: contacts, error: contactsError } = await supabase
+      .from('company_contacts')
+      .select('*')
+      .in('company', companies)
+
+    if (contactsError) {
+      console.error('[daily-digest] company_contacts fetch error:', contactsError.message)
+    }
+
+    // Group contacts by company for O(1) lookup
+    const contactsByCompany: Record<string, unknown[]> = {}
+    for (const c of contacts ?? []) {
+      const co = c.company as string
+      if (!contactsByCompany[co]) contactsByCompany[co] = []
+      contactsByCompany[co].push(c)
+    }
+
+    const result = jobs.map((j) => ({
+      ...j,
+      contacts: contactsByCompany[j.company as string] ?? [],
+    }))
+
+    return res.json({ jobs: result, count: result.length })
+  } catch (err) {
+    console.error('[daily-digest]', err)
+    return res.status(500).json({ error: (err as Error).message })
+  }
 })
 
-jobsRouter.get('/:id', async (req, res) => {
-  const { data, error } = await supabase
-    .from('jobs')
-    .select('*')
-    .eq('id', req.params.id)
-    .single()
+// ---------------------------------------------------------------------------
+// GET /api/jobs/search
+// Supports: schools, location, company, minScore, jobType,
+//           salary_min, salary_max, posted (7d|30d|all), fresherOnly,
+//           page, perPage
+//
+// IMPORTANT: schools filter works via job_course_mappings (normalized table).
+// We never query jobs.schools — that column does not exist.
+// ---------------------------------------------------------------------------
+router.get('/search', async (req: Request, res: Response) => {
+  try {
+    const {
+      schools,
+      location,
+      company,
+      minScore,
+      jobType,
+      salary_min,
+      salary_max,
+      posted,
+      fresherOnly,
+      page = '1',
+      perPage = '20',
+    } = req.query as Record<string, string>
 
-  if (error) return res.status(404).json({ error: 'Job not found' })
-  return res.json(data)
+    const pageNum = Math.max(1, parseInt(page))
+    const perPageNum = Math.min(100, Math.max(1, parseInt(perPage)))
+    const from = (pageNum - 1) * perPageNum
+    const to = from + perPageNum - 1
+
+    // -- Step 1: resolve school filter via job_course_mappings --
+    let allowedJobIds: string[] | null = null
+    if (schools) {
+      const schoolList = schools.split(',').map((s) => s.trim()).filter(Boolean)
+      if (schoolList.length > 0) {
+        const { data: mappings, error: mappingError } = await supabase
+          .from('job_course_mappings')
+          .select('job_id')
+          .in('school_code', schoolList)
+
+        if (mappingError) throw mappingError
+
+        allowedJobIds = [...new Set((mappings ?? []).map((m) => m.job_id as string))]
+
+        // No jobs matched the school filter — short-circuit
+        if (allowedJobIds.length === 0) {
+          return res.json({ jobs: [], total: 0, page: pageNum, perPage: perPageNum })
+        }
+      }
+    }
+
+    // -- Step 2: build jobs query with all column-level filters --
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let query: any = supabase
+      .from('jobs')
+      .select('*, job_course_mappings(*)', { count: 'exact' })
+      .eq('is_active', true)
+
+    if (allowedJobIds !== null) query = query.in('id', allowedJobIds)
+    if (location)    query = query.ilike('location', `%${location}%`)
+    if (company)     query = query.ilike('company', `%${company}%`)
+    if (minScore)    query = query.gte('conversion_score', parseFloat(minScore))
+    if (jobType)     query = query.eq('job_type', jobType)
+    if (salary_min)  query = query.gte('salary_min', parseInt(salary_min))
+    if (salary_max)  query = query.lte('salary_max', parseInt(salary_max))
+    if (fresherOnly === 'true') query = query.eq('is_fresher_friendly', true)
+
+    if (posted === '7d') {
+      query = query.gte('posted_date', new Date(Date.now() - 7 * 86_400_000).toISOString())
+    } else if (posted === '30d') {
+      query = query.gte('posted_date', new Date(Date.now() - 30 * 86_400_000).toISOString())
+    }
+
+    const {
+      data,
+      error,
+      count,
+    }: { data: Job[] | null; error: { message: string } | null; count: number | null } =
+      await query.order('conversion_score', { ascending: false }).range(from, to)
+
+    if (error) throw error
+    return res.json({ jobs: data ?? [], total: count ?? 0, page: pageNum, perPage: perPageNum })
+  } catch (err) {
+    console.error('[search]', err)
+    return res.status(500).json({ error: (err as Error).message })
+  }
 })
+
+// ---------------------------------------------------------------------------
+// GET /api/jobs/:id
+// Full detail: job + course_mappings (FK join) + contacts + company_stats
+// ---------------------------------------------------------------------------
+router.get('/:id', async (req: Request, res: Response) => {
+  try {
+    const { data: job, error: jobError } = await supabase
+      .from('jobs')
+      .select('*')
+      .eq('id', req.params.id)
+      .single()
+
+    if (jobError || !job) return res.status(404).json({ error: 'Job not found' })
+
+    const [mappingsRes, contactsRes, statsRes] = await Promise.all([
+      supabase
+        .from('job_course_mappings')
+        .select('*')
+        .eq('job_id', req.params.id),
+      supabase
+        .from('company_contacts')
+        .select('*')
+        .eq('company', job.company),
+      supabase
+        .from('company_stats')
+        .select('*')
+        .eq('company', job.company)
+        .maybeSingle(),
+    ])
+
+    if (mappingsRes.error) console.error('[job/:id] mappings error:', mappingsRes.error.message)
+    if (contactsRes.error) console.error('[job/:id] contacts error:', contactsRes.error.message)
+
+    return res.json({
+      ...job,
+      course_mappings: mappingsRes.data ?? [],
+      contacts: contactsRes.data ?? [],
+      company_stats: statsRes.data ?? null,
+    })
+  } catch (err) {
+    console.error('[job/:id]', err)
+    return res.status(500).json({ error: (err as Error).message })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// POST /api/jobs
+// Manual job upload by director / admin. Only writes columns that exist in DB.
+// ---------------------------------------------------------------------------
+router.post('/', async (req: Request, res: Response) => {
+  try {
+    const body = req.body as Partial<Job>
+
+    if (!body.title || !body.company) {
+      return res.status(400).json({ error: 'title and company are required' })
+    }
+
+    const { data, error } = await supabase
+      .from('jobs')
+      .insert({
+        title: body.title,
+        company: body.company,
+        location: body.location ?? null,
+        job_type: body.job_type ?? null,
+        experience_required: body.experience_required ?? null,
+        salary_min: body.salary_min ?? null,
+        salary_max: body.salary_max ?? null,
+        skills: body.skills ?? null,
+        description: body.description ?? null,
+        source_url: body.source_url ?? null,
+        source: body.source ?? null,
+        is_fresher_friendly: body.is_fresher_friendly ?? false,
+        conversion_score: body.conversion_score ?? 0,
+        has_red_flags: false,
+        red_flags: null,
+        posted_date: body.posted_date ?? null,
+        is_active: body.is_active ?? true,
+      })
+      .select()
+      .single()
+
+    if (error) throw error
+    return res.status(201).json(data)
+  } catch (err) {
+    console.error('[POST /jobs]', err)
+    return res.status(500).json({ error: (err as Error).message })
+  }
+})
+
+export default router
