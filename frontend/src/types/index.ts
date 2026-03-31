@@ -194,6 +194,14 @@ export interface AdminStats {
   bySchool: Record<string, number>
 }
 
+/** GET /api/users?role=officer */
+export interface OfficerUser {
+  id: string
+  name: string
+  email: string
+  activeAssignments: number
+}
+
 /** Job search filters */
 export interface JobFilters {
   schools?: string

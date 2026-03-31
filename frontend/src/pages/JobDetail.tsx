@@ -3,6 +3,7 @@ import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useMutation } from '@tanstack/react-query'
 import { useJob } from '../hooks/useJobs'
 import api from '../lib/api'
+import SendToOfficerModal from '../components/SendToOfficerModal'
 import type { JobCourseMapping, CompanyContact, CompanyStats } from '../types'
 
 // ---------------------------------------------------------------------------
@@ -162,78 +163,6 @@ function ContactCard({ contact }: { contact: CompanyContact }) {
   )
 }
 
-// ---------------------------------------------------------------------------
-// Send-to-officer modal
-// ---------------------------------------------------------------------------
-interface SendModalProps {
-  jobId: string
-  onClose: () => void
-}
-
-function SendModal({ jobId, onClose }: SendModalProps) {
-  const [officerIds, setOfficerIds] = useState('')
-  const [note, setNote] = useState('')
-
-  const mutation = useMutation({
-    mutationFn: async () => {
-      const ids = officerIds.split(',').map((s) => s.trim()).filter(Boolean)
-      await api.post('/distributions/send', { jobId, officerIds: ids, note: note || undefined })
-    },
-    onSuccess: onClose,
-  })
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
-        <h2 className="text-lg font-bold text-gray-900 mb-1">Send to Officer</h2>
-        <p className="text-sm text-gray-500 mb-4">Distribute this job to placement officers</p>
-
-        <label className="block text-sm font-medium text-gray-700 mb-1">
-          Officer ID(s) <span className="text-red-500">*</span>
-        </label>
-        <input
-          type="text"
-          placeholder="Comma-separated officer UUIDs"
-          value={officerIds}
-          onChange={(e) => setOfficerIds(e.target.value)}
-          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-teal-500"
-        />
-
-        <label className="block text-sm font-medium text-gray-700 mb-1">Note (optional)</label>
-        <textarea
-          rows={3}
-          placeholder="Add context for the officer..."
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-teal-500 resize-none"
-        />
-
-        {mutation.isError && (
-          <p className="text-red-600 text-sm mb-3">Failed to send. Check officer IDs and try again.</p>
-        )}
-        {mutation.isSuccess && (
-          <p className="text-green-600 text-sm mb-3">Successfully distributed.</p>
-        )}
-
-        <div className="flex gap-3">
-          <button
-            onClick={onClose}
-            className="flex-1 py-2.5 text-sm font-medium text-gray-700 border border-gray-300 rounded-xl hover:bg-gray-50 transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={() => mutation.mutate()}
-            disabled={!officerIds.trim() || mutation.isPending}
-            className="flex-1 py-2.5 text-sm font-semibold text-white bg-[#0F766E] rounded-xl hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            {mutation.isPending ? 'Sending…' : 'Send'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
 
 // ---------------------------------------------------------------------------
 // Draft Email modal — POST /api/templates/email
@@ -960,7 +889,13 @@ export default function JobDetail() {
 
       {/* Modals */}
       {activeModal === 'send' && (
-        <SendModal jobId={job.id} onClose={() => setActiveModal(null)} />
+        <SendToOfficerModal
+          jobIds={[job.id]}
+          jobTitle={job.title}
+          company={job.company}
+          onClose={() => setActiveModal(null)}
+          onSent={() => setActiveModal(null)}
+        />
       )}
       {activeModal === 'email' && (
         <DraftEmailModal jobId={job.id} onClose={() => setActiveModal(null)} />

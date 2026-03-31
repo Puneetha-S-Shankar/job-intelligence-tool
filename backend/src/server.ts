@@ -9,6 +9,7 @@ import officerRouter from './routes/officer'
 import analyticsRouter from './routes/analytics'
 import templatesRouter from './routes/templates'
 import adminRouter from './routes/admin'
+import usersRouter from './routes/users'
 import { statsRouter } from './routes/stats'
 import { alertsRouter } from './routes/alerts'
 import { startCronJobs } from './jobs/scheduler'
@@ -28,6 +29,7 @@ app.use('/api/officer', officerRouter)
 app.use('/api/analytics', analyticsRouter)
 app.use('/api/templates', templatesRouter)
 app.use('/api/admin', adminRouter)
+app.use('/api/users', usersRouter)
 
 // Legacy / supplementary routes
 app.use('/api/stats', statsRouter)

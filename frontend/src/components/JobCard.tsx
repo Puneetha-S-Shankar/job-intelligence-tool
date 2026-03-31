@@ -1,11 +1,14 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { Job, JobCourseMapping } from '../types'
+import SendToOfficerModal from './SendToOfficerModal'
 
 interface JobCardProps {
   job: Job
   course_mappings: JobCourseMapping[]
   isSelected?: boolean
   onSelect?: (id: string) => void
+  /** Legacy callback — if provided the parent controls the send flow */
   onSendToOfficer?: (id: string) => void
 }
 
@@ -80,6 +83,7 @@ export default function JobCard({
   onSelect,
   onSendToOfficer,
 }: JobCardProps) {
+  const [showSendModal, setShowSendModal] = useState(false)
   const salary = formatSalary(job.salary_min, job.salary_max)
 
   return (
@@ -176,15 +180,29 @@ export default function JobCard({
         >
           View Details
         </Link>
-        {onSendToOfficer && (
-          <button
-            onClick={() => onSendToOfficer(job.id)}
-            className="flex-1 text-sm font-medium text-white bg-teal-600 rounded-lg py-1.5 hover:bg-teal-700 transition-colors"
-          >
-            Send to Officer
-          </button>
-        )}
+        <button
+          onClick={() => {
+            if (onSendToOfficer) {
+              onSendToOfficer(job.id)
+            } else {
+              setShowSendModal(true)
+            }
+          }}
+          className="flex-1 text-sm font-medium text-white bg-teal-600 rounded-lg py-1.5 hover:bg-teal-700 transition-colors"
+        >
+          Send to Officer
+        </button>
       </div>
+
+      {showSendModal && (
+        <SendToOfficerModal
+          jobIds={[job.id]}
+          jobTitle={job.title}
+          company={job.company}
+          onClose={() => setShowSendModal(false)}
+          onSent={() => setShowSendModal(false)}
+        />
+      )}
     </div>
   )
 }

@@ -1,8 +1,7 @@
 import { useState } from 'react'
-import { useMutation } from '@tanstack/react-query'
 import { useDailyDigest } from '../hooks/useJobs'
 import JobCard from '../components/JobCard'
-import api from '../lib/api'
+import SendToOfficerModal from '../components/SendToOfficerModal'
 
 // ---------------------------------------------------------------------------
 // Loading skeleton
@@ -26,87 +25,6 @@ function JobSkeleton() {
   )
 }
 
-// ---------------------------------------------------------------------------
-// Send-to-officer modal (simple — officer ID input)
-// ---------------------------------------------------------------------------
-interface SendModalProps {
-  jobIds: string[]
-  onClose: () => void
-}
-
-function SendToOfficerModal({ jobIds, onClose }: SendModalProps) {
-  const [officerIds, setOfficerIds] = useState('')
-  const [note, setNote] = useState('')
-
-  const mutation = useMutation({
-    mutationFn: async () => {
-      const ids = officerIds
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean)
-      // Send each job to all specified officers
-      await Promise.all(
-        jobIds.map((jobId) =>
-          api.post('/distributions/send', { jobId, officerIds: ids, note: note || undefined })
-        )
-      )
-    },
-    onSuccess: onClose,
-  })
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
-        <h2 className="text-lg font-bold text-gray-900 mb-1">Send to Officer</h2>
-        <p className="text-sm text-gray-500 mb-4">
-          {jobIds.length} job{jobIds.length !== 1 ? 's' : ''} selected
-        </p>
-
-        <label className="block text-sm font-medium text-gray-700 mb-1">
-          Officer ID(s) <span className="text-red-500">*</span>
-        </label>
-        <input
-          type="text"
-          placeholder="Comma-separated officer UUIDs"
-          value={officerIds}
-          onChange={(e) => setOfficerIds(e.target.value)}
-          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-teal-500"
-        />
-
-        <label className="block text-sm font-medium text-gray-700 mb-1">Note (optional)</label>
-        <textarea
-          rows={3}
-          placeholder="Add a note for the officer..."
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-teal-500 resize-none"
-        />
-
-        {mutation.isError && (
-          <p className="text-red-600 text-sm mb-3">
-            Failed to send. Please check officer IDs and try again.
-          </p>
-        )}
-
-        <div className="flex gap-3">
-          <button
-            onClick={onClose}
-            className="flex-1 py-2 text-sm font-medium text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={() => mutation.mutate()}
-            disabled={!officerIds.trim() || mutation.isPending}
-            className="flex-1 py-2 text-sm font-medium text-white bg-teal-600 rounded-lg hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            {mutation.isPending ? 'Sending…' : 'Send'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
 
 // ---------------------------------------------------------------------------
 // Main page
@@ -267,6 +185,10 @@ export default function DailyDigest() {
         <SendToOfficerModal
           jobIds={Array.from(selectedJobIds)}
           onClose={() => {
+            setShowModal(false)
+            clearAll()
+          }}
+          onSent={() => {
             setShowModal(false)
             clearAll()
           }}
