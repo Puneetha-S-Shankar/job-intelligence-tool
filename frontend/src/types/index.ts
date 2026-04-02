@@ -202,17 +202,22 @@ export interface OfficerUser {
   activeAssignments: number
 }
 
-/** Job search filters */
+/** Job search filters — maps 1:1 to GET /api/jobs/search query params */
 export interface JobFilters {
+  /** Comma-separated school codes, filtered via job_course_mappings */
   schools?: string
+  /** Comma-separated locations (ILIKE OR match) */
   location?: string
   company?: string
+  /** Minimum conversion_score (≥) */
   minScore?: string
   jobType?: string
   salary_min?: string
   salary_max?: string
   posted?: '7d' | '30d' | 'all'
   fresherOnly?: boolean
+  /** Sort order: score (default) | date | salary */
+  sort?: 'score' | 'date' | 'salary'
   page?: number
   perPage?: number
 }

@@ -1,25 +1,15 @@
+// ─── SCRAPER SERVICE ──────────────────────────────────────────────────────────
+// All Playwright + Cheerio + Axios scraping logic.
+// Used ONLY by the daily background scheduler — never called on user search.
+
 import { chromium, Browser, Page } from "playwright";
 import axios from "axios";
 import * as cheerio from "cheerio";
-import { supabase } from "../db/supabase";
+import { supabase } from "../../db/supabase";
+import type { RawJob } from "./types";
 
-// ─── TYPES ────────────────────────────────────────────────────────────────────
-
-interface RawJob {
-  title: string;
-  company: string;
-  location: string;
-  description?: string;
-  salary?: string;
-  jobType?: string;
-  experienceRequired?: string;
-  sourceUrl: string;
-  source: "linkedin" | "naukri" | "shine" | "instahire" | "company_site";
-  postedDate?: Date;
-  skills?: string[];
-}
-
-interface CompanyRow {
+// ── Re-export CompanyRow shape (used by scheduler) ───────────────────────────
+export interface CompanyRow {
   id: string;
   name: string;
   careers_url: string;
@@ -27,28 +17,32 @@ interface CompanyRow {
   university_id: string;
 }
 
+/** Postgres `job_source` enum has no `serp` — Google Jobs / SerpAPI hits store as `linkedin`. */
+function sourceForJobsTable(source: RawJob["source"]): Exclude<RawJob["source"], "serp"> {
+  return source === "serp" ? "linkedin" : source;
+}
+
 // ─── BROWSER LAUNCH ARGS ─────────────────────────────────────────────────────
-// Shared args for every browser launch — optimised for low RAM on free tier
 
 const BROWSER_ARGS = [
   "--no-sandbox",
   "--disable-setuid-sandbox",
-  "--disable-dev-shm-usage",  // critical for Railway free tier RAM
+  "--disable-dev-shm-usage",
   "--disable-gpu",
-          // reduces RAM usage significantly
+  "--single-process",
 ];
 
 async function launchBrowser(): Promise<Browser> {
   return chromium.launch({ headless: true, args: BROWSER_ARGS });
 }
 
-// ─── UTILITY HELPERS ──────────────────────────────────────────────────────────
+// ─── UTILITY HELPERS ─────────────────────────────────────────────────────────
 
 function delay(ms: number) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-function normalizeLocation(raw: string): string {
+export function normalizeLocation(raw: string): string {
   const map: Record<string, string> = {
     "bengaluru": "Bangalore", "bengaluru, karnataka": "Bangalore",
     "bangalore urban": "Bangalore", "bangalore, karnataka": "Bangalore",
@@ -58,7 +52,7 @@ function normalizeLocation(raw: string): string {
   return map[raw.toLowerCase().trim()] ?? raw.trim();
 }
 
-function parseSalary(raw: string): { min: number | null; max: number | null } {
+export function parseSalary(raw: string): { min: number | null; max: number | null } {
   if (!raw) return { min: null, max: null };
   const lpaMatch = raw.match(/(\d+\.?\d*)\s*[-–to]+\s*(\d+\.?\d*)\s*lpa/i);
   if (lpaMatch) {
@@ -77,7 +71,7 @@ function parseSalary(raw: string): { min: number | null; max: number | null } {
   return { min: null, max: null };
 }
 
-function isFresherJob(title: string, experience: string, description: string): boolean {
+export function isFresherJob(title: string, experience: string, description: string): boolean {
   const text = `${title} ${experience} ${description}`.toLowerCase();
   const fresherKeywords = [
     "fresher", "fresh graduate", "0-1 year", "0-2 year",
@@ -93,7 +87,7 @@ function isFresherJob(title: string, experience: string, description: string): b
   return isFresher && !isSenior;
 }
 
-function extractSkills(description: string): string[] {
+export function extractSkills(description: string): string[] {
   const skillKeywords = [
     "Python", "Java", "JavaScript", "TypeScript", "React", "Node.js", "SQL",
     "MongoDB", "AWS", "Docker", "Git", "Figma", "Excel", "Power BI", "Tally",
@@ -107,8 +101,7 @@ function extractSkills(description: string): string[] {
   );
 }
 
-// ─── DEDUPLICATION ────────────────────────────────────────────────────────────
-// Check DB — not in-memory — so it works across scrape runs
+// ─── DEDUPLICATION ───────────────────────────────────────────────────────────
 
 async function jobExists(sourceUrl: string): Promise<boolean> {
   if (!sourceUrl) return false;
@@ -139,7 +132,6 @@ async function nearDuplicateExists(
 }
 
 // ─── COMPANY AUTO-DISCOVERY ───────────────────────────────────────────────────
-// When a new company is found in a job posting, add it to the companies table
 
 async function autoAddCompany(
   companyName: string,
@@ -171,9 +163,16 @@ async function autoAddCompany(
   console.log(`[DISCOVER] New company added: ${companyName} (from ${discoveredFrom})`);
 }
 
-// ─── SAVE JOB TO DB ───────────────────────────────────────────────────────────
+// ─── SAVE JOB TO DB ──────────────────────────────────────────────────────────
+// Exported so serpApiService can reuse it for saving live SERP results
 
-async function saveJob(job: RawJob, universityId: string): Promise<boolean> {
+// schoolCodes: when saving SERP-found jobs, pass the school codes being searched
+// so the job gets job_course_mappings rows and appears in future DB school-filtered searches.
+export async function saveJob(
+  job: RawJob,
+  universityId: string,
+  schoolCodes: string[] = []
+): Promise<boolean> {
   try {
     if (job.sourceUrl && await jobExists(job.sourceUrl)) return false;
     if (await nearDuplicateExists(job.title, job.company, job.location)) return false;
@@ -185,26 +184,48 @@ async function saveJob(job: RawJob, universityId: string): Promise<boolean> {
     const salary = parseSalary(job.salary || "");
     const skills = job.skills || extractSkills(job.description || "");
 
-    await supabase.from("jobs").insert({
-      title: job.title.trim(),
-      company: job.company.trim(),
-      location: normalizeLocation(job.location || "Bangalore"),
-      description: job.description || "",
-      experience_required: job.experienceRequired || "0-1 years",
-      salary_min: salary.min,
-      salary_max: salary.max,
-      skills,
-      source_url: job.sourceUrl,
-      source: job.source,
-      job_type: job.jobType || "fulltime",
-      is_fresher_friendly: true,
-      conversion_score: 50,
-      posted_date: job.postedDate?.toISOString() || new Date().toISOString(),
-      is_active: true,
-      university_id: universityId,
-      // NOTE: no 'schools' column — school mappings only go in job_course_mappings
-      // enrichmentService.ts handles that after this job is saved
-    });
+    const { data: inserted, error: insertError } = await supabase
+      .from("jobs")
+      .insert({
+        title: job.title.trim(),
+        company: job.company.trim(),
+        location: normalizeLocation(job.location || "Bangalore"),
+        description: job.description || "",
+        experience_required: job.experienceRequired || "0-1 years",
+        salary_min: salary.min,
+        salary_max: salary.max,
+        skills,
+        source_url: job.sourceUrl,
+        source: sourceForJobsTable(job.source),
+        job_type: job.jobType || "fulltime",
+        is_fresher_friendly: true,
+        conversion_score: 50,
+        posted_date: job.postedDate?.toISOString() || new Date().toISOString(),
+        is_active: true,
+        university_id: universityId,
+        // NOTE: no 'schools' column — school mappings live in job_course_mappings
+      })
+      .select("id")
+      .single();
+
+    if (insertError) throw insertError;
+
+    // Persist school mappings so future DB searches by school find this job
+    if (inserted?.id && schoolCodes.length > 0) {
+      const mappings = schoolCodes.map(code => ({
+        job_id: inserted.id as string,
+        school_code: code,
+        school_name: null as string | null,
+        confidence: 0.5,
+        reasoning: "Matched via SERP live search for this school",
+      }));
+      const { error: mappingError } = await supabase
+        .from("job_course_mappings")
+        .upsert(mappings, { onConflict: "job_id,school_code" });
+      if (mappingError) {
+        console.error(`[SAVE] Failed to save school mappings for "${job.title}":`, mappingError.message);
+      }
+    }
 
     return true;
   } catch (err: any) {
@@ -213,7 +234,127 @@ async function saveJob(job: RawJob, universityId: string): Promise<boolean> {
   }
 }
 
-// ─── SOURCE 1: NAUKRI (Cheerio — server-rendered, fast) ──────────────────────
+// ── SAVE JOB AND RETURN REAL DB ID ───────────────────────────────────────────
+// Used by the live search path so the response includes real job IDs,
+// enabling "Send to Officer" and "View Details" without requiring a refresh.
+//
+// Returns:
+//   string  — real DB job ID (existing OR newly inserted)
+//   null    — job was skipped (not a fresher job)
+export async function saveJobGetId(
+  job: RawJob,
+  universityId: string,
+  schoolCodes: string[] = []
+): Promise<string | null> {
+  try {
+    const effectiveUrl =
+      job.sourceUrl?.trim() ||
+      `https://www.google.com/search?q=${encodeURIComponent(job.title + " " + job.company)}`;
+
+    // Job already in DB by URL → return its existing ID
+    const { data: byUrl } = await supabase
+      .from("jobs")
+      .select("id")
+      .eq("source_url", effectiveUrl)
+      .maybeSingle();
+    if (byUrl?.id) return byUrl.id as string;
+
+    // Near-duplicate added today → return its existing ID
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const { data: byDup } = await supabase
+      .from("jobs")
+      .select("id")
+      .ilike("title", job.title)
+      .ilike("company", job.company)
+      .gte("created_at", today.toISOString())
+      .limit(1)
+      .maybeSingle();
+    if (byDup?.id) return byDup.id as string;
+
+    // SERP results already come from fresher-oriented queries; strict isFresherJob
+    // rejects many valid listings (e.g. "Relationship Manager" hits senior keyword
+    // "manager", sparse descriptions miss "fresher"). Still gate non-SERP callers.
+    if (
+      job.source !== "serp" &&
+      !isFresherJob(job.title, job.experienceRequired || "", job.description || "")
+    ) {
+      return null;
+    }
+
+    // Insert new job and capture its ID
+    const salary = parseSalary(job.salary || "");
+    const skills = job.skills || extractSkills(job.description || "");
+
+    const { data: inserted, error: insertError } = await supabase
+      .from("jobs")
+      .insert({
+        title: job.title.trim(),
+        company: job.company.trim(),
+        location: normalizeLocation(job.location || "Bangalore"),
+        description: job.description || "",
+        experience_required: job.experienceRequired || "0-1 years",
+        salary_min: salary.min,
+        salary_max: salary.max,
+        skills,
+        source_url: effectiveUrl,
+        source: sourceForJobsTable(job.source),
+        job_type: job.jobType || "fulltime",
+        is_fresher_friendly: true,
+        conversion_score: 50,
+        posted_date: job.postedDate?.toISOString() || new Date().toISOString(),
+        is_active: true,
+        university_id: universityId,
+      })
+      .select("id")
+      .single();
+
+    if (insertError) {
+      // Race: two parallel search requests inserting the same URL
+      if (insertError.code === "23505" || String(insertError.message).toLowerCase().includes("duplicate")) {
+        const { data: race } = await supabase
+          .from("jobs")
+          .select("id")
+          .eq("source_url", effectiveUrl)
+          .maybeSingle();
+        if (race?.id) return race.id as string;
+      }
+      console.error(
+        `[SAVE] saveJobGetId insert failed for "${job.title}" @ ${job.company}:`,
+        insertError.message,
+        insertError,
+      );
+      return null;
+    }
+    if (!inserted?.id) return null;
+
+    const realId = inserted.id as string;
+
+    // Save school mappings so future DB school-filtered searches find this job
+    if (schoolCodes.length > 0) {
+      const mappings = schoolCodes.map(code => ({
+        job_id: realId,
+        school_code: code,
+        school_name: null as string | null,
+        confidence: 0.5,
+        reasoning: "Matched via SERP live search for this school",
+      }));
+      const { error: mappingError } = await supabase
+        .from("job_course_mappings")
+        .upsert(mappings, { onConflict: "job_id,school_code" });
+      if (mappingError) {
+        console.error(`[SAVE] School mapping error for "${job.title}":`, mappingError.message);
+      }
+    }
+
+    return realId;
+  } catch (err: any) {
+    console.error(`[SAVE] Failed in saveJobGetId for "${job.title}":`, err.message);
+    return null;
+  }
+}
+
+// ─── SOURCE 1: NAUKRI ────────────────────────────────────────────────────────
 
 export async function scrapeNaukri(universityId: string): Promise<number> {
   const queries = [
@@ -244,8 +385,6 @@ export async function scrapeNaukri(universityId: string): Promise<number> {
 
       const $ = cheerio.load(html);
 
-      // Naukri job card selectors (as of 2026 — update if they change)
-      // Collect synchronously (cheerio .each doesn't support async), then process
       const naukriJobs: { title: string; company: string; location: string; salary: string; expText: string; sourceUrl: string }[] = [];
       $(".jobTuple, .job-container, article.jobTupleHeader").each((_, el) => {
         const title    = $(el).find(".title, .jobTitle, h2").first().text().trim();
@@ -281,7 +420,7 @@ export async function scrapeNaukri(universityId: string): Promise<number> {
   return saved;
 }
 
-// ─── SOURCE 2: SHINE (Cheerio — server-rendered) ─────────────────────────────
+// ─── SOURCE 2: SHINE ─────────────────────────────────────────────────────────
 
 export async function scrapeShine(universityId: string): Promise<number> {
   const queries = [
@@ -301,7 +440,6 @@ export async function scrapeShine(universityId: string): Promise<number> {
 
       const $ = cheerio.load(html);
 
-      // Collect synchronously (cheerio .each doesn't support async), then process
       const shineJobs: { title: string; company: string; location: string; sourceUrl: string }[] = [];
       $(".job-listing-section, .jb-body, [class*='jobCard']").each((_, el) => {
         const title    = $(el).find("h3, .job-title, [class*='title']").first().text().trim();
@@ -335,7 +473,7 @@ export async function scrapeShine(universityId: string): Promise<number> {
   return saved;
 }
 
-// ─── SOURCE 3: LINKEDIN (Playwright — JS-rendered) ───────────────────────────
+// ─── SOURCE 3: LINKEDIN (Playwright) ─────────────────────────────────────────
 
 export async function scrapeLinkedIn(universityId: string): Promise<number> {
   const queries = [
@@ -363,7 +501,6 @@ export async function scrapeLinkedIn(universityId: string): Promise<number> {
       try {
         const encoded = encodeURIComponent(query);
         await page.goto(
-          // f_E=1,2 = Entry level + Internship; f_TPR=r86400 = posted in last 24 hours
           `https://www.linkedin.com/jobs/search/?keywords=${encoded}&location=Bangalore%2C+Karnataka%2C+India&f_E=1,2&f_TPR=r86400`,
           { waitUntil: "networkidle", timeout: 20000 }
         );
@@ -419,7 +556,7 @@ export async function scrapeLinkedIn(universityId: string): Promise<number> {
   return saved;
 }
 
-// ─── SOURCE 4: COMPANY CAREERS PAGES (Playwright — JS-rendered, per-company browser) ──
+// ─── SOURCE 4: COMPANY CAREERS PAGES ─────────────────────────────────────────
 // Fresh browser per company — complete isolation, no "Target page closed" errors.
 
 export async function scrapeCompanyCareerPages(universityId: string): Promise<number> {
@@ -462,15 +599,10 @@ export async function scrapeCompanyCareerPages(universityId: string): Promise<nu
 
         const selectors = [
           "[data-testid='job']",
-          "[class*='job-listing']",
-          "[class*='JobListing']",
-          "[class*='job-card']",
-          "[class*='JobCard']",
-          "[class*='position']",
-          "[class*='opening']",
-          "[class*='career-item']",
-          "li.job",
-          ".job",
+          "[class*='job-listing']", "[class*='JobListing']",
+          "[class*='job-card']",   "[class*='JobCard']",
+          "[class*='position']",   "[class*='opening']",
+          "[class*='career-item']","li.job", ".job",
         ];
 
         for (const sel of selectors) {
@@ -480,14 +612,8 @@ export async function scrapeCompanyCareerPages(universityId: string): Promise<nu
               const titleEl = el.querySelector("h1, h2, h3, h4, strong, [class*='title'], [class*='Title']");
               const title = (titleEl as HTMLElement)?.innerText?.trim();
               const link = (el.querySelector("a") as HTMLAnchorElement)?.href;
-
               if (title && title.length > 3 && title.length < 200) {
-                results.push({
-                  title,
-                  company: companyName,
-                  sourceUrl: link || window.location.href,
-                  location: "Bangalore",
-                });
+                results.push({ title, company: companyName, sourceUrl: link || window.location.href, location: "Bangalore" });
               }
             });
             break;
@@ -498,10 +624,7 @@ export async function scrapeCompanyCareerPages(universityId: string): Promise<nu
       }, company.name);
 
       for (const job of jobs) {
-        const didSave = await saveJob({
-          ...job,
-          source: "company_site" as const,
-        }, universityId);
+        const didSave = await saveJob({ ...job, source: "company_site" as const }, universityId);
         if (didSave) {
           saved++;
           console.log(`[CAREERS] Saved: ${job.title} at ${company.name}`);
@@ -514,13 +637,10 @@ export async function scrapeCompanyCareerPages(universityId: string): Promise<nu
         .eq("id", company.id);
 
       console.log(`[CAREERS] ✓ ${company.name}: ${jobs.length} jobs found`);
-
       await context.close();
 
     } catch (err: any) {
       console.error(`[CAREERS] ✗ ${company.name}: ${err.message}`);
-
-      // Still mark as scraped even on error so it isn't immediately retried
       await supabase
         .from("companies")
         .update({ last_scraped_at: new Date().toISOString() })
@@ -532,8 +652,7 @@ export async function scrapeCompanyCareerPages(universityId: string): Promise<nu
           console.warn(`[CAREERS] Browser didn't close cleanly for ${company.name}:`, e.message);
         });
       }
-
-      await delay(3000); // let RAM recover between companies
+      await delay(3000);
     }
   }
 
@@ -541,8 +660,8 @@ export async function scrapeCompanyCareerPages(universityId: string): Promise<nu
   return saved;
 }
 
-// ─── MAIN PIPELINE ────────────────────────────────────────────────────────────
-// Called by scheduler.ts and the admin trigger-scrape endpoint
+// ─── FULL PIPELINE ───────────────────────────────────────────────────────────
+// Called by scheduler.ts (daily background refresh) and admin trigger-scrape.
 
 export async function runFullScrapingPipeline(): Promise<{
   naukri: number; shine: number; linkedin: number; careers: number; total: number;
@@ -567,7 +686,7 @@ export async function runFullScrapingPipeline(): Promise<{
   results.naukri = await scrapeNaukri(universityId);
   results.shine  = await scrapeShine(universityId);
 
-  console.log("[PIPELINE] Step 2: LinkedIn discovery...");
+  console.log("[PIPELINE] Step 2: LinkedIn (Playwright) discovery...");
   results.linkedin = await scrapeLinkedIn(universityId);
 
   console.log("[PIPELINE] Step 3: Company career pages...");

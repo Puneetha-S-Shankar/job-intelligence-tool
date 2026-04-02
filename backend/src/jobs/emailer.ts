@@ -29,6 +29,36 @@ async function sendEmail(to: string, subject: string, html: string) {
   )
 }
 
+
+export async function sendDailyDigest(
+  to: string,
+  jobs: any[]
+) {
+  if (!jobs?.length) {
+    console.log("[emailer] No jobs to send in digest");
+    return;
+  }
+
+  const rows = jobs
+    .map(
+      (job) =>
+        `<li>
+          <strong>${job.title}</strong> — ${job.company}, ${job.location}
+        </li>`
+    )
+    .join("");
+
+  await sendEmail(
+    to,
+    `Daily Placement Digest — ${jobs.length} new jobs`,
+    `
+      <h2>Daily Placement Job Digest</h2>
+      <p>Here are the latest fresher-friendly jobs:</p>
+      <ul>${rows}</ul>
+    `
+  );
+}
+
 export async function sendAlertEmails(frequency: 'daily' | 'weekly') {
   const { data: alerts, error } = await supabase
     .from('alerts')

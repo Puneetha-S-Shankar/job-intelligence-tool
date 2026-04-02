@@ -174,12 +174,23 @@ export default function JobCard({
 
       {/* Action buttons */}
       <div className="px-4 pb-4 flex items-center gap-2 border-t border-gray-50 pt-3">
-        <Link
-          to={`/jobs/${job.id}`}
-          className="flex-1 text-center text-sm font-medium text-teal-700 border border-teal-200 rounded-lg py-1.5 hover:bg-teal-50 transition-colors"
-        >
-          View Details
-        </Link>
+        {job.id.startsWith('live_') ? (
+          <a
+            href={job.source_url ?? '#'}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex-1 text-center text-sm font-medium text-teal-700 border border-teal-200 rounded-lg py-1.5 hover:bg-teal-50 transition-colors"
+          >
+            View Source ↗
+          </a>
+        ) : (
+          <Link
+            to={`/jobs/${job.id}`}
+            className="flex-1 text-center text-sm font-medium text-teal-700 border border-teal-200 rounded-lg py-1.5 hover:bg-teal-50 transition-colors"
+          >
+            View Details
+          </Link>
+        )}
         <button
           onClick={() => {
             if (onSendToOfficer) {
@@ -188,7 +199,9 @@ export default function JobCard({
               setShowSendModal(true)
             }
           }}
-          className="flex-1 text-sm font-medium text-white bg-teal-600 rounded-lg py-1.5 hover:bg-teal-700 transition-colors"
+          disabled={job.id.startsWith('live_')}
+          title={job.id.startsWith('live_') ? 'Save job to DB first before sending' : undefined}
+          className="flex-1 text-sm font-medium text-white bg-teal-600 rounded-lg py-1.5 hover:bg-teal-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
           Send to Officer
         </button>

@@ -44,6 +44,7 @@ export function useJobs(filters: JobFilters = {}) {
   if (filters.salary_max)   params.salary_max = filters.salary_max
   if (filters.posted)       params.posted = filters.posted
   if (filters.fresherOnly)  params.fresherOnly = 'true'
+  if (filters.sort)         params.sort = filters.sort
   if (filters.page)         params.page = String(filters.page)
   if (filters.perPage)      params.perPage = String(filters.perPage)
 

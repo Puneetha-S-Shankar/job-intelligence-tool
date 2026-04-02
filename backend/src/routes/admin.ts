@@ -1,7 +1,8 @@
 import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { supabase } from '../db/supabase'
-import { scrapeJobs } from '../jobs/scraper'
+import { runFullScrapingPipeline } from '../services/jobSearch'
+import { runDailyRefresh } from '../services/jobSearch/scheduler'
 import { aiProvider } from '../services/ai/index'
 import { enrichmentService } from '../services/enrichmentService'
 
@@ -9,11 +10,16 @@ const router = Router()
 
 // ---------------------------------------------------------------------------
 // POST /api/admin/trigger-scrape
+// Triggers the full daily refresh (SERP + scraping pipeline + email digest).
+// Runs async — returns immediately so the request doesn't timeout on free tier.
 // ---------------------------------------------------------------------------
 router.post('/trigger-scrape', async (_req: Request, res: Response) => {
   try {
-    await scrapeJobs()
-    return res.json({ success: true, message: 'Scrape triggered successfully' })
+    console.log('[ADMIN] Manual daily refresh triggered')
+    runDailyRefresh().catch(err => {
+      console.error('[ADMIN] Daily refresh error:', err)
+    })
+    return res.json({ ok: true, message: 'Daily refresh started in background. Check server logs for progress.' })
   } catch (err) {
     console.error('[admin/trigger-scrape]', err)
     return res.status(500).json({ error: (err as Error).message })
@@ -132,6 +138,23 @@ router.post('/enrich-all', async (_req: Request, res: Response) => {
 })
 
 // ---------------------------------------------------------------------------
+// GET /api/admin/companies — all companies in DB with scrape stats
+// ---------------------------------------------------------------------------
+router.get('/companies', async (_req: Request, res: Response) => {
+  try {
+    const { data, error } = await supabase
+      .from('companies')
+      .select('id, name, tier, is_gcc, city, discovered_from, last_scraped_at, scrape_enabled, created_at')
+      .order('created_at', { ascending: false })
+    if (error) throw error
+    return res.json({ companies: data, total: data?.length || 0 })
+  } catch (err) {
+    console.error('[GET /admin/companies]', err)
+    return res.status(500).json({ error: (err as Error).message })
+  }
+})
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/stats
 // bySchool is derived from job_course_mappings — NOT from jobs.schools (invalid).
 // ---------------------------------------------------------------------------
@@ -139,7 +162,7 @@ router.get('/stats', async (_req: Request, res: Response) => {
   try {
     const today = new Date().toISOString().split('T')[0]
 
-    const [totalRes, todayRes, sourceRes, schoolMappingRes] = await Promise.all([
+    const [totalRes, todayRes, sourceRes, schoolMappingRes, companiesRes] = await Promise.all([
       supabase
         .from('jobs')
         .select('*', { count: 'exact', head: true })
@@ -159,6 +182,10 @@ router.get('/stats', async (_req: Request, res: Response) => {
       supabase
         .from('job_course_mappings')
         .select('school_code'),
+
+      supabase
+        .from('companies')
+        .select('id', { count: 'exact', head: true }),
     ])
 
     const bySource: Record<string, number> = {}
@@ -175,7 +202,8 @@ router.get('/stats', async (_req: Request, res: Response) => {
 
     return res.json({
       totalJobs: totalRes.count ?? 0,
-      todayJobs: todayRes.count ?? 0,
+      totalCompanies: companiesRes.count ?? 0,
+      jobsToday: todayRes.count ?? 0,
       bySource,
       bySchool,
     })

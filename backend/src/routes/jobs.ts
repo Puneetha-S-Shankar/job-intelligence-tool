@@ -2,6 +2,8 @@ import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { supabase } from '../db/supabase'
 import type { Job } from '../types'
+import { searchJobs } from '../services/jobSearch'
+import type { SearchFilters } from '../services/jobSearch'
 
 const router = Router()
 
@@ -56,86 +58,19 @@ router.get('/daily-digest', async (_req: Request, res: Response) => {
 
 // ---------------------------------------------------------------------------
 // GET /api/jobs/search
-// Supports: schools, location, company, minScore, jobType,
+// Layer 1: DB query + live SERP API results, merged and deduplicated.
+// Supports: schools, location (comma-sep), company, minScore, jobType,
 //           salary_min, salary_max, posted (7d|30d|all), fresherOnly,
-//           page, perPage
+//           page, perPage, sort (score|date|salary)
 //
 // IMPORTANT: schools filter works via job_course_mappings (normalized table).
 // We never query jobs.schools — that column does not exist.
 // ---------------------------------------------------------------------------
 router.get('/search', async (req: Request, res: Response) => {
   try {
-    const {
-      schools,
-      location,
-      company,
-      minScore,
-      jobType,
-      salary_min,
-      salary_max,
-      posted,
-      fresherOnly,
-      page = '1',
-      perPage = '20',
-    } = req.query as Record<string, string>
-
-    const pageNum = Math.max(1, parseInt(page))
-    const perPageNum = Math.min(100, Math.max(1, parseInt(perPage)))
-    const from = (pageNum - 1) * perPageNum
-    const to = from + perPageNum - 1
-
-    // -- Step 1: resolve school filter via job_course_mappings --
-    let allowedJobIds: string[] | null = null
-    if (schools) {
-      const schoolList = schools.split(',').map((s) => s.trim()).filter(Boolean)
-      if (schoolList.length > 0) {
-        const { data: mappings, error: mappingError } = await supabase
-          .from('job_course_mappings')
-          .select('job_id')
-          .in('school_code', schoolList)
-
-        if (mappingError) throw mappingError
-
-        allowedJobIds = [...new Set((mappings ?? []).map((m) => m.job_id as string))]
-
-        // No jobs matched the school filter — short-circuit
-        if (allowedJobIds.length === 0) {
-          return res.json({ jobs: [], total: 0, page: pageNum, perPage: perPageNum })
-        }
-      }
-    }
-
-    // -- Step 2: build jobs query with all column-level filters --
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let query: any = supabase
-      .from('jobs')
-      .select('*, job_course_mappings(*)', { count: 'exact' })
-      .eq('is_active', true)
-
-    if (allowedJobIds !== null) query = query.in('id', allowedJobIds)
-    if (location)    query = query.ilike('location', `%${location}%`)
-    if (company)     query = query.ilike('company', `%${company}%`)
-    if (minScore)    query = query.gte('conversion_score', parseFloat(minScore))
-    if (jobType)     query = query.eq('job_type', jobType)
-    if (salary_min)  query = query.gte('salary_min', parseInt(salary_min))
-    if (salary_max)  query = query.lte('salary_max', parseInt(salary_max))
-    if (fresherOnly === 'true') query = query.eq('is_fresher_friendly', true)
-
-    if (posted === '7d') {
-      query = query.gte('posted_date', new Date(Date.now() - 7 * 86_400_000).toISOString())
-    } else if (posted === '30d') {
-      query = query.gte('posted_date', new Date(Date.now() - 30 * 86_400_000).toISOString())
-    }
-
-    const {
-      data,
-      error,
-      count,
-    }: { data: Job[] | null; error: { message: string } | null; count: number | null } =
-      await query.order('conversion_score', { ascending: false }).range(from, to)
-
-    if (error) throw error
-    return res.json({ jobs: data ?? [], total: count ?? 0, page: pageNum, perPage: perPageNum })
+    const filters: SearchFilters = req.query as Record<string, string>
+    const result = await searchJobs(filters)
+    return res.json(result)
   } catch (err) {
     console.error('[search]', err)
     return res.status(500).json({ error: (err as Error).message })

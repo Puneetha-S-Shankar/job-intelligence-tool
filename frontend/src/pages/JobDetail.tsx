@@ -6,6 +6,7 @@ import api from '../lib/api'
 import SendToOfficerModal from '../components/SendToOfficerModal'
 import type { JobCourseMapping, CompanyContact, CompanyStats } from '../types'
 
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -598,11 +599,11 @@ export default function JobDetail() {
             </div>
 
             {/* Red flag chips */}
-            {job.has_red_flags && job.red_flags && job.red_flags.length > 0 && (
+            {job.has_red_flags && (job.red_flags?.length ?? 0) > 0 && (
               <div className="mb-4 p-3 rounded-xl bg-red-500/20 border border-red-400/30">
                 <p className="text-xs font-semibold text-red-200 mb-2">Red Flags Detected</p>
                 <div className="flex flex-wrap gap-1.5">
-                  {job.red_flags.map((flag, i) => (
+                  {(job.red_flags ?? []).map((flag, i) => (
                     <span
                       key={i}
                       className="px-2.5 py-1 rounded-full text-xs text-red-100 bg-red-500/30 border border-red-400/40"
@@ -615,14 +616,14 @@ export default function JobDetail() {
             )}
 
             {/* School mappings */}
-            {job.course_mappings.length > 0 && (
+            {(job.course_mappings?.length ?? 0) === 0 && (
               <div>
                 <p className="text-teal-200 text-xs font-semibold mb-2">Relevant Schools</p>
-                <SchoolBadges mappings={job.course_mappings} />
+                <SchoolBadges mappings={job.course_mappings || []} />
               </div>
             )}
 
-            {job.course_mappings.length === 0 && (
+            {(job.course_mappings?.length ?? 0) === 0 && (
               <p className="text-teal-300 text-xs italic">
                 School mappings will appear after AI enrichment.
               </p>
@@ -645,11 +646,11 @@ export default function JobDetail() {
             )}
 
             {/* Skills */}
-            {job.skills && job.skills.length > 0 && (
+            {(job.skills?.length ?? 0) > 0 && (
               <div>
                 <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Skills Required</p>
                 <div className="flex flex-wrap gap-2">
-                  {job.skills.map((skill) => (
+                  {(job.skills ?? []).map((skill) => (
                     <span
                       key={skill}
                       className="px-3 py-1 rounded-lg text-sm bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors"
@@ -710,7 +711,7 @@ export default function JobDetail() {
               Contact Information
             </h2>
 
-            {job.contacts.length === 0 ? (
+            {(job.contacts?.length ?? 0) === 0 ? (
               <div className="flex flex-col items-center text-center py-6">
                 <div className="w-10 h-10 rounded-xl bg-gray-100 flex items-center justify-center mb-2">
                   <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -722,7 +723,7 @@ export default function JobDetail() {
               </div>
             ) : (
               <div className="space-y-3">
-                {job.contacts.map((c) => (
+                {(job.contacts || []).map((c) => (
                   <ContactCard key={c.id} contact={c} />
                 ))}
               </div>

@@ -12,7 +12,7 @@ import adminRouter from './routes/admin'
 import usersRouter from './routes/users'
 import { statsRouter } from './routes/stats'
 import { alertsRouter } from './routes/alerts'
-import { startCronJobs } from './jobs/scheduler'
+import { startScheduler } from "./services/jobSearch/scheduler";
 
 const app = express()
 
@@ -39,7 +39,7 @@ const PORT = process.env.PORT ?? 4000
 
 app.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`)
-  startCronJobs()
+  startScheduler()
 })
 
 export default app

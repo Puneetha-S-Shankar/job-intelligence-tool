@@ -17,7 +17,7 @@ router.get('/', async (req: Request, res: Response) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let query: any = supabase
       .from('users')
-      .select('id, name, email, role, school_code')
+      .select('id, name, email, role')
       .order('name')
 
     if (role) query = query.eq('role', role as UserRole)
