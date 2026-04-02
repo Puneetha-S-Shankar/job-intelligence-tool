@@ -79,11 +79,16 @@ export async function runDailyRefresh(): Promise<void> {
       .limit(20);
 
     if (process.env.DIRECTOR_EMAIL && topJobs?.length) {
-      const { sendDailyDigest } = await import("../../jobs/emailer");
-      await sendDailyDigest(process.env.DIRECTOR_EMAIL, topJobs);
+      try {
+        const { sendDailyDigest } = await import("../../jobs/emailer");
+        await sendDailyDigest(process.env.DIRECTOR_EMAIL, topJobs);
+        console.log("[SCHEDULER] Email sent successfully");
+      } catch (emailErr) {
+        console.error("[SCHEDULER] Email failed:", emailErr);
+      }
     }
   } catch (err) {
-    console.error("[SCHEDULER] Email digest failed:", err);
+    console.error("[SCHEDULER] Email digest step failed:", err);
   }
 }
 
@@ -91,6 +96,8 @@ export async function runDailyRefresh(): Promise<void> {
 // Called once at server boot. Registers the 6 AM cron — does not run immediately.
 
 export function startScheduler(): void {
-  cron.schedule("0 6 * * *", runDailyRefresh);
+  cron.schedule("0 6 * * *", runDailyRefresh, {
+    timezone: "Asia/Kolkata",
+  });
   console.log("[JOB SEARCH] Daily scheduler initialized");
 }

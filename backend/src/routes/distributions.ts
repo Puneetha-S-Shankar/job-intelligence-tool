@@ -1,6 +1,10 @@
 import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { supabase } from '../db/supabase'
+import {
+  sendJobAssignedToOfficerEmail,
+  type JobAssignmentEmailJob,
+} from '../jobs/emailer'
 
 const router = Router()
 
@@ -25,10 +29,10 @@ router.post('/send', async (req: Request, res: Response) => {
         .json({ error: 'jobId and a non-empty officerIds array are required' })
     }
 
-    // Validate job exists
+    // Validate job exists + load fields for assignment email
     const { data: job, error: jobError } = await supabase
       .from('jobs')
-      .select('id')
+      .select('id, title, company, location, conversion_score, source_url')
       .eq('id', jobId)
       .single()
 
@@ -36,10 +40,12 @@ router.post('/send', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Job not found' })
     }
 
-    // Validate all officers exist
+    const jobRow = job as JobAssignmentEmailJob
+
+    // Validate all officers exist + load email / name for notifications
     const { data: officers, error: officerError } = await supabase
       .from('users')
-      .select('id')
+      .select('id, email, name')
       .in('id', officerIds)
 
     if (officerError) {
@@ -85,6 +91,38 @@ router.post('/send', async (req: Request, res: Response) => {
         console.error('[distributions/send] outcomes insert error:', outcomeError.message)
       }
     }
+
+    // Notify each officer by email (best-effort — DB assignment already succeeded)
+    const officerById = new Map(
+      (officers ?? []).map((o: { id: string; email: string; name: string | null }) => [
+        o.id,
+        o,
+      ]),
+    )
+
+    const emailResults = await Promise.allSettled(
+      officerIds.map((oid) => {
+        const o = officerById.get(oid)
+        if (!o?.email?.trim()) {
+          return Promise.reject(new Error(`officer ${oid} has no email`))
+        }
+        return sendJobAssignedToOfficerEmail({
+          toEmail: o.email.trim(),
+          officerName: o.name?.trim() || 'Officer',
+          job: jobRow,
+          note: note ?? null,
+        })
+      }),
+    )
+
+    emailResults.forEach((r, i) => {
+      if (r.status === 'rejected') {
+        console.error(
+          `[distributions/send] Assignment email failed for officer ${officerIds[i]}:`,
+          r.reason,
+        )
+      }
+    })
 
     return res.json({ success: true, count: inserted?.length ?? 0 })
   } catch (err) {

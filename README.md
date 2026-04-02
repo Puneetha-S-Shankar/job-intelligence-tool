@@ -1,6 +1,6 @@
 # Job Intelligence Tool
 
-A full-stack placement intelligence platform for RVU Placements. Scrapes job listings, AI-enriches them with school mappings and red-flag detection, lets directors distribute jobs to officers, and tracks outcomes through a conversion funnel — all in a single monorepo.
+A full-stack placement intelligence platform for RVU Placements. Combines **Supabase**-stored jobs with **live SerpAPI (Google Jobs)** results on every filtered search, runs a **daily** scrape (Naukri, Shine, LinkedIn, company career pages, plus optional company-targeted SERP refresh), AI-enriches listings with school mappings and red-flag detection, and lets directors distribute jobs to officers while tracking outcomes — all in a single monorepo.
 
 ---
 
@@ -9,7 +9,8 @@ A full-stack placement intelligence platform for RVU Placements. Scrapes job lis
 | Layer    | Technologies |
 |----------|-------------|
 | Frontend | React 18, TypeScript, Vite, Tailwind CSS v3, React Router v6, TanStack Query v5, Axios |
-| Backend  | Node.js, Express 5, TypeScript, Supabase JS, node-cron, Axios, SendGrid |
+| Backend  | Node.js, Express 5, TypeScript, Supabase JS, node-cron, Axios, Nodemailer (Gmail SMTP) |
+| Live jobs | SerpAPI (`google_jobs` engine) for UI search + scheduler company pass |
 | Database | Supabase (Postgres) |
 | AI       | Google Gemini / Anthropic Claude (via unified `aiProvider`) |
 
@@ -55,17 +56,28 @@ job-intelligence-tool/
 │       ├── types/
 │       │   └── index.ts            # Domain interfaces (Job, Outcome, User, …)
 │       ├── db/
-│       │   └── supabase.ts         # Primary Supabase client
+│       │   ├── supabase.ts         # Primary Supabase client
+│       │   ├── seed.ts             # npm run seed
+│       │   └── seedCompanies.ts    # npm run seed:companies
 │       ├── lib/
 │       │   └── supabase.ts         # Secondary Supabase client (alerts/stats)
 │       ├── services/
+│       │   ├── jobSearch/          # Job search pipeline (live + daily)
+│       │   │   ├── index.ts        # searchJobs() — DB + SerpAPI merge orchestrator
+│       │   │   ├── dbSearchService.ts   # Supabase filtered queries + school mappings
+│       │   │   ├── serpApiService.ts    # SerpAPI Google Jobs (live + company batch)
+│       │   │   ├── mergeService.ts      # Dedupe DB + live RawJob → unified list
+│       │   │   ├── scraperService.ts    # Naukri, Shine, LinkedIn Playwright, careers pages
+│       │   │   ├── scheduler.ts    # Daily cron: SERP by company → scrape → email
+│       │   │   └── types.ts
 │       │   ├── enrichmentService.ts
 │       │   ├── claudeService.ts
 │       │   └── ai/                 # Gemini + Claude provider abstraction
 │       ├── jobs/
-│       │   ├── scheduler.ts        # node-cron schedule
-│       │   ├── scraper.ts          # Job scraper
-│       │   └── emailer.ts          # SendGrid email alerts
+│       │   ├── emailer.ts          # Nodemailer (Gmail SMTP) — digest & alert emails
+│       │   └── scraper.ts          # Legacy duplicate (prefer services/jobSearch)
+│       ├── data/
+│       │   └── gccCompanies.ts     # Seed list for companies table (optional)
 │       └── server.ts               # Express app entry point (port 4000)
 │
 ├── package.json                    # Root — runs both with concurrently
@@ -96,10 +108,12 @@ cp backend/.env.example backend/.env
 | `SUPABASE_KEY` | Supabase anon or service-role key |
 | `GEMINI_API_KEY` | Google Gemini API key |
 | `CLAUDE_API_KEY` | Anthropic Claude API key (fallback) |
-| `SENDGRID_API_KEY` | SendGrid key for email alerts |
-| `EMAIL_FROM` | Sender address for digests |
+| `EMAIL_USER` | Gmail address used as SMTP login and `From` address for digests |
+| `EMAIL_PASS` | [Google App Password](https://support.google.com/accounts/answer/185833) (16 characters) — **not** your normal Gmail password |
+| `DIRECTOR_EMAIL` | Recipient for the daily placement digest after the scheduled refresh |
 | `CLIENT_ORIGIN` | Frontend origin for CORS (default `http://localhost:5173`) |
 | `PORT` | Backend port (default `4000`) |
+| `SERP_API_KEY` | [SerpAPI](https://serpapi.com) key — powers **live job search** (Google Jobs) and the **daily company LinkedIn refresh** in the scheduler. Without it, live search returns DB-only results. |
 
 Frontend env (`frontend/.env`):
 
@@ -139,7 +153,61 @@ npm run build
 | `universities` | University + curriculum data |
 | `alerts` | Email alert subscriptions |
 
-> **Important:** `schools` is **not** a column on `jobs`. School mappings live exclusively in `job_course_mappings`.
+> **Important:** `schools` is **not** a column on `jobs`. School mappings live exclusively in `job_course_mappings`. **Companies** are not mapped to schools — only **jobs** are, via `job_course_mappings`.
+
+---
+
+## Job search & data ingestion pipeline
+
+The backend splits job discovery into two layers: **interactive search** (user-driven, filter-rich) and **daily background refresh** (broad, company-centric). Shared code lives under `backend/src/services/jobSearch/`.
+
+### Layer 1 — Live search (`GET /api/jobs/search`)
+
+Triggered on every use of the **Search Jobs** UI (and any client calling the endpoint with filters).
+
+1. **Database query** (`dbSearchService.ts`)  
+   Loads jobs already in Supabase that match query params: schools (via `job_course_mappings`), location(s), company, `job_type`, salary, posted window, fresher-only, min score, **sort** (`score` \| `date` \| `salary`), pagination.
+
+2. **SerpAPI — Google Jobs** (`serpApiService.ts`)  
+   In parallel, calls SerpAPI’s `google_jobs` engine with queries derived from the user’s **school** filter (RVU codes: `SoCSE`, `SoB`, `SoLAS`, …) and optional **location**. Uses curriculum keywords from `universities.curriculum` when available, plus static per-school query templates.  
+   **No Playwright** and no careers-page scraping on this path.
+
+3. **Persist new live rows** (`saveJobGetId` in `scraperService.ts`)  
+   Each SerpAPI hit is upserted so the API response can return a **real `jobs.id` UUID** immediately (enables **View details** and **Send to officer** without a manual refresh).  
+   - Duplicate detection: `source_url`, then same-day title+company fuzzy match.  
+   - **School filter:** rows are linked via `job_course_mappings` for the schools being searched.  
+   - In-app `RawJob.source` is `"serp"`; the DB enum `job_source` does **not** include `serp`, so inserts store **`linkedin`** (Google Jobs listings are typically LinkedIn-backed).
+
+4. **Merge & dedupe** (`mergeService.ts`)  
+   Combines the DB page with live results: URL and title+company deduping, DB rows first, then net-new live rows. Response includes `liveCount` (rows originating from SerpAPI on **this** request, after dedupe against the DB page) and `source`: `"db"` or `"db+live"`.
+
+**Edge cases documented in code:** Supabase range errors (`PGRST103`) when a page is beyond available rows are handled by returning an empty DB slice instead of 500. Frontend normalizes `job_type` labels to lowercase enum values expected by Postgres.
+
+### Layer 2 — Daily scheduler (`scheduler.ts`)
+
+Runs on a cron schedule (initialized from `server.ts` via `startScheduler()`). **Generic** ingestion — not tied to UI filters.
+
+1. **Company-driven SerpAPI** (`searchJobsByCompanies` in `serpApiService.ts`)  
+   Loads up to 20 `scrape_enabled` companies from the DB (oldest `last_scraped_at` first), searches for recent fresher-style openings at those companies via Google Jobs, saves new jobs with `saveJob` (no school codes — school mapping is left to **AI enrichment** or later processes).
+
+2. **Full scrape pipeline** (`runFullScrapingPipeline` in `scraperService.ts`)  
+   **Naukri** (Cheerio), **Shine** (Cheerio), **LinkedIn** listings (Playwright), then **company career pages** from the `companies` table (Playwright, per-company browser for stability). New jobs are inserted if they pass fresher heuristics and dedup rules.
+
+3. **Email** (`jobs/emailer.ts`)  
+   **Nodemailer (Gmail SMTP):** sends a daily digest to `DIRECTOR_EMAIL` when `EMAIL_USER`, `EMAIL_PASS` (Google App Password), and `DIRECTOR_EMAIL` are set.
+
+Admin manual trigger: `POST /api/admin/trigger-scrape` runs `runDailyRefresh()` (SERP-by-company + full pipeline + digest), not UI search.
+
+### SerpAPI configuration
+
+- Env: `SERP_API_KEY` in `backend/.env` (see `backend/.env.example`).  
+- Live search uses the **Google Jobs** engine with location and `date_posted` chips aligned to the `posted` filter when possible.
+
+### Frontend search UX (summary)
+
+- School codes in the UI match DB `school_code` values on `job_course_mappings`.  
+- When a school filter is active, **school badges** on cards can be restricted to the selected schools so cross-tagged jobs are easier to read (`SearchJobs.tsx`).  
+- **JobCard:** jobs with temporary `live_*` IDs (e.g. failed save or non-persisted row) show **View source** and disable **Send to officer**; real UUIDs enable full flows.
 
 ---
 
@@ -196,33 +264,40 @@ Returns the top 30 active fresher-friendly jobs sorted by `conversion_score` des
 
 #### `GET /api/jobs/search`
 
-Filtered, paginated job search. All query parameters are optional.
+Filtered, paginated job search backed by **`services/jobSearch/searchJobs()`**: Supabase + optional **SerpAPI** live results, merged and deduplicated. All query parameters are optional.
 
 **Query parameters**
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `schools` | `string` | Comma-separated school codes — filters via `job_course_mappings` |
-| `location` | `string` | Case-insensitive partial match on `location` |
+| `schools` | `string` | Comma-separated RVU school codes (`SoCSE`, `SoB`, `SoLAS`, …) — filters DB via `job_course_mappings`; also steers SerpAPI query strings |
+| `location` | `string` | Comma-separated locations; each is OR-matched with `ILIKE` on `location` (first location also used for SerpAPI) |
 | `company` | `string` | Case-insensitive partial match on `company` |
-| `minScore` | `number` | Minimum `conversion_score` |
-| `jobType` | `string` | Exact match on `job_type` |
-| `salary_min` | `number` | Minimum `salary_min` value |
-| `salary_max` | `number` | Maximum `salary_max` value |
-| `posted` | `7d` \| `30d` \| `all` | Recency filter on `posted_date` |
-| `fresherOnly` | `true` | Only return `is_fresher_friendly = true` jobs |
-| `page` | `number` | Page number (default `1`) |
-| `perPage` | `number` | Results per page, max 100 (default `20`) |
+| `minScore` | `string` | Minimum `conversion_score` (numeric string) |
+| `jobType` | `string` | DB enum value, e.g. `fulltime`, `internship` — frontend sends lowercase values |
+| `salary_min` | `string` | Minimum `salary_min` (INR, numeric string) |
+| `salary_max` | `string` | Maximum `salary_max` (INR, numeric string) |
+| `posted` | `7d` \| `30d` | Recency filter on `posted_date`; omit for no extra recency filter |
+| `fresherOnly` | `true` | Only `is_fresher_friendly = true` |
+| `sort` | `score` \| `date` \| `salary` | Sort order (default: conversion score descending) |
+| `page` | `string` | Page number (default `1`) |
+| `perPage` | `string` | Page size, max 100 (default `20`) |
 
 **Response**
 ```json
 {
-  "jobs": [ /* array of Job + job_course_mappings */ ],
+  "jobs": [ /* Job rows + nested job_course_mappings; live rows use real UUIDs after save */ ],
   "total": 142,
   "page": 1,
-  "perPage": 20
+  "perPage": 20,
+  "liveCount": 12,
+  "source": "db+live"
 }
 ```
+
+- `liveCount` — number of listings merged from the SerpAPI leg on this request (after dedupe against the DB page); these rows are also written to `jobs` when save succeeds, so they carry real UUIDs in the JSON.  
+- `source` — `"db"` if SerpAPI was skipped or returned nothing; `"db+live"` if any live rows were merged.  
+- If `SERP_API_KEY` is unset, the handler still runs; live leg is skipped and `source` is typically `"db"`.
 
 **Error responses:** `500 { error: string }`
 
@@ -608,13 +683,11 @@ Deletes the alert with the given `id`.
 
 ---
 
-## Cron Jobs — `jobs/scheduler.ts`
+## Cron Jobs — `services/jobSearch/scheduler.ts`
 
 | Schedule | Task |
 |----------|------|
-| Every 6 hours | Run `scrapeJobs()` — scrape and upsert new listings |
-| Daily at 08:00 | Send daily email digests to matching alert subscribers |
-| Monday at 08:00 | Send weekly email digests |
+| Daily **06:00** (`Asia/Kolkata`) | `runDailyRefresh()` — company-driven SerpAPI pass, full scrape pipeline (`runFullScrapingPipeline`), then optional **Nodemailer (Gmail SMTP)** digest to `DIRECTOR_EMAIL` |
 
 ---
 
