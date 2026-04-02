@@ -11,9 +11,10 @@ export async function searchJobsInDB(filters: SearchFilters): Promise<DBSearchRe
   const from = (pageNum - 1) * perPageNum;
   const to   = from + perPageNum - 1;
 
-  // ── Step 1: resolve school filter via job_course_mappings ──────────────────
-  // Schools map to jobs through the normalized join table — jobs.schools doesn't exist.
-  let allowedJobIds: string[] | null = null;
+  // ── Step 1: resolve school / programme filters via job_course_mappings ─────
+  let allowedFromSchools: string[] | null = null;
+  let allowedFromPrograms: string[] | null = null;
+
   if (filters.schools) {
     const schoolList = filters.schools.split(",").map(s => s.trim()).filter(Boolean);
     if (schoolList.length > 0) {
@@ -24,12 +25,36 @@ export async function searchJobsInDB(filters: SearchFilters): Promise<DBSearchRe
 
       if (mappingError) throw new Error(mappingError.message);
 
-      allowedJobIds = [...new Set((mappings ?? []).map(m => m.job_id as string))];
-
-      if (allowedJobIds.length === 0) {
-        return { jobs: [], total: 0, page: pageNum, perPage: perPageNum };
-      }
+      allowedFromSchools = [...new Set((mappings ?? []).map(m => m.job_id as string))];
     }
+  }
+
+  if (filters.programs) {
+    const programList = filters.programs.split(",").map(s => s.trim()).filter(Boolean);
+    if (programList.length > 0) {
+      const { data: mappings, error: mappingError } = await supabase
+        .from("job_course_mappings")
+        .select("job_id")
+        .in("program_id", programList);
+
+      if (mappingError) throw new Error(mappingError.message);
+
+      allowedFromPrograms = [...new Set((mappings ?? []).map(m => m.job_id as string))];
+    }
+  }
+
+  let allowedJobIds: string[] | null = null;
+  if (allowedFromSchools !== null && allowedFromPrograms !== null) {
+    const ps = new Set(allowedFromPrograms);
+    allowedJobIds = allowedFromSchools.filter(id => ps.has(id));
+  } else if (allowedFromPrograms !== null) {
+    allowedJobIds = allowedFromPrograms;
+  } else if (allowedFromSchools !== null) {
+    allowedJobIds = allowedFromSchools;
+  }
+
+  if (allowedJobIds !== null && allowedJobIds.length === 0) {
+    return { jobs: [], total: 0, page: pageNum, perPage: perPageNum };
   }
 
   // ── Step 2: build jobs query with column-level filters ────────────────────

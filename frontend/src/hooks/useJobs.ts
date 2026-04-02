@@ -36,6 +36,7 @@ export function useJobs(filters: JobFilters = {}) {
   const params: Record<string, string> = {}
 
   if (filters.schools)      params.schools = filters.schools
+  if (filters.programs)    params.programs = filters.programs
   if (filters.location)     params.location = filters.location
   if (filters.company)      params.company = filters.company
   if (filters.minScore)     params.minScore = filters.minScore

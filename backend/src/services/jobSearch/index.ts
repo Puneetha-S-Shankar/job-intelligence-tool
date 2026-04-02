@@ -24,8 +24,8 @@ export type { SearchFilters, SearchResponse } from "./types";
 // ─── MAIN EXPORT ─────────────────────────────────────────────────────────────
 
 export async function searchJobs(filters: SearchFilters): Promise<SearchResponse> {
-  // Resolve school codes upfront — used for SERP tagging, school badge display, and DB mapping
   const schoolCodes = filters.schools?.split(",").map(s => s.trim()).filter(Boolean) ?? [];
+  const programIds = filters.programs?.split(",").map(s => s.trim()).filter(Boolean) ?? [];
 
   // Run DB query, SERP fetch, and university ID lookup all concurrently
   const [dbResult, liveJobs, universityId] = await Promise.all([
@@ -46,11 +46,19 @@ export async function searchJobs(filters: SearchFilters): Promise<SearchResponse
   }
   if (universityId && liveJobs.length > 0) {
     savedIds = await Promise.all(
-      liveJobs.map(job => saveJobGetId(job, universityId, schoolCodes).catch(() => null))
+      liveJobs.map(job =>
+        saveJobGetId(job, universityId, schoolCodes, programIds).catch(() => null)
+      )
     );
   }
 
-  const { jobs, liveCount } = mergeAndDedupe(dbResult.jobs, liveJobs, schoolCodes, savedIds);
+  const { jobs, liveCount } = mergeAndDedupe(
+    dbResult.jobs,
+    liveJobs,
+    schoolCodes,
+    savedIds,
+    programIds
+  );
 
   return {
     jobs,

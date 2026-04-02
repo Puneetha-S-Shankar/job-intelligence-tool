@@ -1,8 +1,10 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 import { useJobs } from '../hooks/useJobs'
 import JobCard from '../components/JobCard'
 import type { JobFilters } from '../types'
+import api from '../lib/api'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -13,12 +15,14 @@ const SCHOOLS = [
   { code: 'SoB',    label: 'SoB – Business' },
   { code: 'SDI',    label: 'SDI – Design & Innovation' },
   { code: 'SoLAS',  label: 'SoLAS – Liberal Arts & Sciences' },
-  { code: 'SoEPP',  label: 'SoEPP – Engineering, Physics & Chem' },
+  { code: 'SoEPP',  label: 'SoEPP – Economics & Public Policy' },
   { code: 'SoL',    label: 'SoL – Law' },
   { code: 'SoFMCA', label: 'SoFMCA – Film, Media & Creative Arts' },
   { code: 'SoAHP',  label: 'SoAHP – Allied Health Professions' },
-  { code: 'SCEPS',  label: 'SCEPS – Commerce, Economics & Policy' },
+  { code: 'SCEPS',  label: 'SCEPS – Continuing Education & Professional Studies' },
 ]
+
+type CatalogProgram = { id: string; school_code: string; name: string }
 
 const LOCATIONS = ['Bangalore', 'Mumbai', 'Hyderabad', 'Pune', 'Delhi', 'Remote']
 
@@ -77,6 +81,8 @@ const PER_PAGE = 20
 // ---------------------------------------------------------------------------
 interface DraftFilters {
   schools: string[]
+  /** Optional programme ids (subset of selected schools) */
+  programs: string[]
   locations: string[]
   company: string
   scorePreset: string        // '' | '40' | '60' | '80'
@@ -91,6 +97,7 @@ interface DraftFilters {
 
 const DEFAULT_DRAFT: DraftFilters = {
   schools: [],
+  programs: [],
   locations: [],
   company: '',
   scorePreset: '',
@@ -117,7 +124,15 @@ const LS_KEY = 'jit_saved_searches'
 
 function loadSavedSearches(): SavedSearch[] {
   try {
-    return JSON.parse(localStorage.getItem(LS_KEY) ?? '[]') as SavedSearch[]
+    const raw = JSON.parse(localStorage.getItem(LS_KEY) ?? '[]') as SavedSearch[]
+    return raw.map((s) => ({
+      ...s,
+      filters: {
+        ...DEFAULT_DRAFT,
+        ...s.filters,
+        programs: s.filters.programs ?? [],
+      },
+    }))
   } catch {
     return []
   }
@@ -133,6 +148,7 @@ function persistSavedSearches(items: SavedSearch[]) {
 function draftToParams(d: DraftFilters): Record<string, string> {
   const p: Record<string, string> = {}
   if (d.schools.length)    p.schools  = d.schools.join(',')
+  if (d.programs.length) p.programs = d.programs.join(',')
   if (d.locations.length)  p.location = d.locations.join(',')
   if (d.company.trim())    p.company  = d.company.trim()
   if (d.jobTypes.length)   p.jobType  = JOB_TYPE_TO_DB[d.jobTypes[0]] ?? d.jobTypes[0]
@@ -169,6 +185,7 @@ function deriveMinScore(d: DraftFilters): string {
 function paramsToApiFilters(params: URLSearchParams): JobFilters {
   const p: JobFilters = { page: 1, perPage: PER_PAGE }
   if (params.get('schools'))    p.schools    = params.get('schools')!
+  if (params.get('programs'))   p.programs   = params.get('programs')!
   if (params.get('location'))   p.location   = params.get('location')!
   if (params.get('company'))    p.company    = params.get('company')!
   if (params.get('minScore'))   p.minScore   = params.get('minScore')!
@@ -186,6 +203,8 @@ function paramsToDraft(params: URLSearchParams): DraftFilters {
   const d: DraftFilters = { ...DEFAULT_DRAFT }
   const schools = params.get('schools')
   if (schools) d.schools = schools.split(',').filter(Boolean)
+  const programs = params.get('programs')
+  if (programs) d.programs = programs.split(',').filter(Boolean)
   const location = params.get('location')
   if (location) d.locations = location.split(',').filter(Boolean)
   if (params.get('company')) d.company = params.get('company')!
@@ -230,6 +249,7 @@ function useDebounce<T>(value: T, delay: number): T {
 function countActiveFilters(d: DraftFilters): number {
   let n = 0
   if (d.schools.length)    n++
+  if (d.programs.length)   n++
   if (d.locations.length)  n++
   if (d.company.trim())    n++
   if (d.tiers.length || d.scorePreset) n++
@@ -319,10 +339,13 @@ function RadioOption({
 // Filter panel content
 // ---------------------------------------------------------------------------
 function FilterPanelContent({
-  draft, onChange,
+  draft,
+  onChange,
+  programsCatalog,
 }: {
   draft: DraftFilters
   onChange: (patch: Partial<DraftFilters>) => void
+  programsCatalog: CatalogProgram[]
 }) {
   function toggleArr<T>(arr: T[], val: T): T[] {
     return arr.includes(val) ? arr.filter((x) => x !== val) : [...arr, val]
@@ -337,9 +360,36 @@ function FilterPanelContent({
             key={code}
             label={label}
             checked={draft.schools.includes(code)}
-            onChange={() => onChange({ schools: toggleArr(draft.schools, code) })}
+            onChange={() => {
+              const nextSchools = toggleArr(draft.schools, code)
+              const nextPrograms = draft.programs.filter((pid) => {
+                const meta = programsCatalog.find((c) => c.id === pid)
+                return meta && nextSchools.includes(meta.school_code)
+              })
+              onChange({ schools: nextSchools, programs: nextPrograms })
+            }}
           />
         ))}
+      </FilterSection>
+
+      {/* 1b. Programme (optional) */}
+      <FilterSection title="Programme (optional)" defaultOpen={false}>
+        {draft.schools.length === 0 ? (
+          <p className="text-xs text-gray-500">Select one or more schools to filter by programme.</p>
+        ) : (
+          <div className="max-h-52 overflow-y-auto space-y-1 pr-1">
+            {programsCatalog
+              .filter((p) => draft.schools.includes(p.school_code))
+              .map((p) => (
+                <CheckOption
+                  key={p.id}
+                  label={p.name}
+                  checked={draft.programs.includes(p.id)}
+                  onChange={() => onChange({ programs: toggleArr(draft.programs, p.id) })}
+                />
+              ))}
+          </div>
+        )}
       </FilterSection>
 
       {/* 2. Location */}
@@ -612,6 +662,21 @@ export default function SearchJobs() {
   // Mobile drawer
   const [drawerOpen, setDrawerOpen] = useState(false)
 
+  const { data: programsCatalog = [] } = useQuery({
+    queryKey: ['jobs-programs-catalog'],
+    queryFn: async () => {
+      const res = await api.get<{ programs: CatalogProgram[] }>('/jobs/programs')
+      return res.data.programs
+    },
+    staleTime: 1000 * 60 * 60,
+  })
+
+  const programNameById = useMemo(() => {
+    const m: Record<string, string> = {}
+    for (const p of programsCatalog) m[p.id] = p.name
+    return m
+  }, [programsCatalog])
+
   // Active filters come FROM the URL (single source of truth for the query)
   const activeFilters: JobFilters = useMemo(
     () => paramsToApiFilters(searchParams),
@@ -684,8 +749,13 @@ export default function SearchJobs() {
   }
 
   function restoreSearch(s: SavedSearch) {
-    setDraft(s.filters)
-    const params = draftToParams(s.filters)
+    const merged: DraftFilters = {
+      ...DEFAULT_DRAFT,
+      ...s.filters,
+      programs: s.filters.programs ?? [],
+    }
+    setDraft(merged)
+    const params = draftToParams(merged)
     setSearchParams({ ...params, page: '1' })
   }
 
@@ -747,7 +817,11 @@ export default function SearchJobs() {
               </button>
             </div>
             <div className="flex-1 overflow-y-auto px-4 py-4">
-              <FilterPanelContent draft={draft} onChange={patchDraft} />
+              <FilterPanelContent
+                draft={draft}
+                onChange={patchDraft}
+                programsCatalog={programsCatalog}
+              />
             </div>
             <div className="px-4 py-4 border-t border-gray-200 flex gap-3">
               <button
@@ -802,7 +876,11 @@ export default function SearchJobs() {
 
             {/* All other filters */}
             <div className="px-4 py-4 space-y-4 max-h-[calc(100vh-240px)] overflow-y-auto">
-              <FilterPanelContent draft={draft} onChange={patchDraft} />
+              <FilterPanelContent
+                draft={draft}
+                onChange={patchDraft}
+                programsCatalog={programsCatalog}
+              />
             </div>
 
             {/* Action buttons */}
@@ -904,6 +982,15 @@ export default function SearchJobs() {
                   {s}
                 </span>
               ))}
+              {activeFilters.programs?.split(',').filter(Boolean).map((pid) => (
+                <span
+                  key={pid}
+                  className="px-2 py-0.5 rounded-full text-xs bg-emerald-100 text-emerald-900 font-medium max-w-[200px] truncate"
+                  title={programNameById[pid] ?? pid}
+                >
+                  {programNameById[pid] ?? pid}
+                </span>
+              ))}
               {activeFilters.location && activeFilters.location.split(',').map((l) => (
                 <span key={l} className="px-2 py-0.5 rounded-full text-xs bg-blue-100 text-blue-800 font-medium">
                   {l}
@@ -986,15 +1073,25 @@ export default function SearchJobs() {
                   // selected schools so the user isn't confused by cross-tagged jobs
                   // showing badges for schools they didn't filter by.
                   const selectedSchools = activeFilters.schools?.split(',').filter(Boolean) ?? []
-                  const visibleMappings = selectedSchools.length > 0
-                    ? job.job_course_mappings.filter(m => selectedSchools.includes(m.school_code))
-                    : job.job_course_mappings
+                  const selectedPrograms = activeFilters.programs?.split(',').filter(Boolean) ?? []
+                  const visibleMappings =
+                    selectedPrograms.length > 0
+                      ? job.job_course_mappings.filter(
+                          (m) =>
+                            m.program_id && selectedPrograms.includes(String(m.program_id))
+                        )
+                      : selectedSchools.length > 0
+                        ? job.job_course_mappings.filter((m) =>
+                            selectedSchools.includes(m.school_code)
+                          )
+                        : job.job_course_mappings
 
                   return (
                     <JobCard
                       key={job.id}
                       job={job}
                       course_mappings={visibleMappings}
+                      programNameById={programNameById}
                     />
                   )
                 })}

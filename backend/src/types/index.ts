@@ -33,6 +33,8 @@ export interface JobCourseMapping {
   id: string
   job_id: string
   school_code: string
+  /** Empty string = school-level mapping only (SERP / legacy). */
+  program_id: string
   school_name: string | null
   confidence: number
   reasoning: string | null

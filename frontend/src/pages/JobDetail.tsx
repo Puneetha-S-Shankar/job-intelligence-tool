@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { useJob } from '../hooks/useJobs'
 import api from '../lib/api'
 import SendToOfficerModal from '../components/SendToOfficerModal'
@@ -66,15 +66,33 @@ function StarRating({ score }: { score: number }) {
 // School badges (inside the Placement Intelligence card)
 // ---------------------------------------------------------------------------
 function SchoolBadges({ mappings }: { mappings: JobCourseMapping[] }) {
+  const { data: programs = [] } = useQuery({
+    queryKey: ['jobs-programs-catalog'],
+    queryFn: async () => {
+      const res = await api.get<{ programs: { id: string; name: string }[] }>('/jobs/programs')
+      return res.data.programs
+    },
+    staleTime: 1000 * 60 * 60,
+  })
+  const nameById = useMemo(() => {
+    const m: Record<string, string> = {}
+    for (const p of programs) m[p.id] = p.name
+    return m
+  }, [programs])
+
   return (
     <div className="flex flex-wrap gap-2">
-      {mappings.map((m) => (
+      {mappings.map((m) => {
+        const pid = m.program_id ? String(m.program_id) : ''
+        const primary =
+          pid && nameById[pid] ? nameById[pid] : pid ? pid : m.school_code
+        return (
         <div
           key={m.id}
           title={m.reasoning ?? undefined}
           className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/20 border border-white/30"
         >
-          <span className="text-sm font-semibold text-white">{m.school_code}</span>
+          <span className="text-sm font-semibold text-white">{primary}</span>
           {m.school_name && (
             <span className="text-xs text-teal-100 hidden sm:inline">{m.school_name}</span>
           )}
@@ -82,7 +100,8 @@ function SchoolBadges({ mappings }: { mappings: JobCourseMapping[] }) {
             {Math.round(m.confidence * 100)}%
           </span>
         </div>
-      ))}
+        )
+      })}
     </div>
   )
 }

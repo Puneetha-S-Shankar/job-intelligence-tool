@@ -2,7 +2,7 @@ import { GoogleGenAI } from '@google/genai'
 import {
   AIProvider,
   CallScript,
-  CourseMapping,
+  ProgramMapping,
   EmailTemplate,
   FresherDetection,
   RedFlagResult,
@@ -39,31 +39,31 @@ export class GeminiProvider implements AIProvider {
     }
   }
 
-  async mapCoursesToJob(
+  async mapProgramsToJob(
     jobTitle: string,
     skills: string[],
     description: string,
-    schoolsJson: string
-  ): Promise<CourseMapping> {
+    programsCatalogJson: string
+  ): Promise<ProgramMapping> {
     const prompt = [
       'You are the placement AI for RV University, Bangalore.',
-      'RVU Schools and focus areas:',
-      schoolsJson,
+      'Canonical programme catalog (JSON array). Each item has id, school_code, name, keywords.',
+      'ONLY choose programme ids from this catalog — never invent ids.',
+      programsCatalogJson,
       '',
       'Job to analyze:',
       'Title: ' + jobTitle,
       'Skills: ' + skills.join(', '),
-      'Description (first 400 chars): ' + description.substring(0, 400),
+      'Description (first 500 chars): ' + description.substring(0, 500),
       '',
-      'Which RVU schools are relevant? Rules:',
-      '- Only include if students from that school would genuinely qualify',
+      'Which programmes are relevant for placing students from RVU?',
       '- 0.8+ = strong direct match, 0.5-0.79 = related, below 0.5 = exclude',
-      '- Max 3 schools per job',
-      'Return ONLY valid JSON (no markdown): { courses: string[], confidence: {school: number}, reasoning: string }',
+      '- Max 5 programme ids per job',
+      'Return ONLY valid JSON (no markdown): { programs: string[], confidence: {program_id: number}, reasoning: string }',
     ].join('\n')
 
     const text = await aiQueue.add(() => this.call(prompt))
-    return this.parseJSON<CourseMapping>(text)
+    return this.parseJSON<ProgramMapping>(text)
   }
 
   async detectFresherFriendly(

@@ -17,7 +17,7 @@
 import type {
   AIProvider,
   CallScript,
-  CourseMapping,
+  ProgramMapping,
   EmailTemplate,
   FresherDetection,
   RedFlagResult,
@@ -30,13 +30,13 @@ export class ClaudeProvider implements AIProvider {
     }
   }
 
-  async mapCoursesToJob(
+  async mapProgramsToJob(
     _jobTitle: string,
     _skills: string[],
     _description: string,
-    _schoolsJson: string
-  ): Promise<CourseMapping> {
-    throw new Error('ClaudeProvider.mapCoursesToJob is not yet implemented')
+    _programsCatalogJson: string
+  ): Promise<ProgramMapping> {
+    throw new Error('ClaudeProvider.mapProgramsToJob is not yet implemented')
   }
 
   async detectFresherFriendly(

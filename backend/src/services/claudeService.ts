@@ -5,7 +5,7 @@
  */
 import { aiProvider } from './ai/index'
 
-export const mapCoursesToJob = aiProvider.mapCoursesToJob.bind(aiProvider)
+export const mapProgramsToJob = aiProvider.mapProgramsToJob.bind(aiProvider)
 export const detectFresherFriendly = aiProvider.detectFresherFriendly.bind(aiProvider)
 export const detectRedFlags = aiProvider.detectRedFlags.bind(aiProvider)
 export const generateEmailTemplate = aiProvider.generateEmailTemplate.bind(aiProvider)

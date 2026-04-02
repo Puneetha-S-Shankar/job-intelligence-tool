@@ -1,4 +1,10 @@
 import { createClient } from '@supabase/supabase-js'
+import {
+  calculateConversionScore,
+  fetchCompanyScoringStats,
+  type CompanyScoringStats,
+  type JobScoringInput,
+} from './scoringService'
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -22,5 +28,20 @@ export const enrichmentService = {
     }
 
     return JSON.stringify(data.curriculum)
-  }
+  },
+
+  /**
+   * After fresher detection, red flags, and school mapping, compute the canonical score
+   * before persisting the job row (single authority: `calculateConversionScore`).
+   */
+  async conversionScoreAfterEnrichment(
+    job: JobScoringInput,
+    company?: string
+  ): Promise<number> {
+    const co = (company ?? job.company).trim()
+    const companyStats = co ? await fetchCompanyScoringStats(co) : undefined
+    return calculateConversionScore(job, companyStats)
+  },
 }
+
+export type { CompanyScoringStats, JobScoringInput }

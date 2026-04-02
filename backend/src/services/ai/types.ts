@@ -1,5 +1,6 @@
-export interface CourseMapping {
-  courses: string[]
+/** AI output: RVU programme ids from the catalog (see backend/src/data/programs.ts). */
+export interface ProgramMapping {
+  programs: string[]
   confidence: Record<string, number>
   reasoning: string
 }
@@ -24,12 +25,12 @@ export interface CallScript {
 }
 
 export interface AIProvider {
-  mapCoursesToJob(
+  mapProgramsToJob(
     jobTitle: string,
     skills: string[],
     description: string,
-    schoolsJson: string
-  ): Promise<CourseMapping>
+    programsCatalogJson: string
+  ): Promise<ProgramMapping>
 
   detectFresherFriendly(
     jobTitle: string,

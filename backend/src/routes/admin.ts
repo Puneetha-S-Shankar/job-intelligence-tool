@@ -5,6 +5,7 @@ import { runFullScrapingPipeline } from '../services/jobSearch'
 import { runDailyRefresh } from '../services/jobSearch/scheduler'
 import { aiProvider } from '../services/ai/index'
 import { enrichmentService } from '../services/enrichmentService'
+import { buildProgramsCatalogJsonForAi, getProgramById } from '../data/programs'
 
 const router = Router()
 
@@ -38,7 +39,7 @@ router.post('/enrich-all', async (_req: Request, res: Response) => {
     // Use enriched_at IS NULL to find unenriched jobs (no ai_enriched boolean column)
     const { data: jobs, error: fetchError } = await supabase
       .from('jobs')
-      .select('id, title, company, description, salary_min, salary_max')
+      .select('id, title, company, description, salary_min, salary_max, skills, experience_required')
       .is('enriched_at', null)
       .eq('is_active', true)
       .limit(50)
@@ -46,14 +47,7 @@ router.post('/enrich-all', async (_req: Request, res: Response) => {
     if (fetchError) throw fetchError
     if (!jobs?.length) return res.json({ enriched: 0, message: 'No unenriched jobs found' })
 
-    let schoolsJson: string
-    try {
-      schoolsJson = await enrichmentService.getSchoolsJson()
-    } catch (err) {
-      return res
-        .status(500)
-        .json({ error: 'Failed to load curriculum: ' + (err as Error).message })
-    }
+    const programsCatalogJson = buildProgramsCatalogJsonForAi()
 
     let enriched = 0
     const errors: string[] = []
@@ -72,7 +66,9 @@ router.post('/enrich-all', async (_req: Request, res: Response) => {
             ? `${salaryMin}+ LPA`
             : 'Not specified'
 
-        const [fresherRes, redFlagRes, courseRes] = await Promise.all([
+        const jobSkills = (job as { skills?: string[] | null }).skills ?? []
+
+        const [fresherRes, redFlagRes, programRes] = await Promise.all([
           aiProvider.detectFresherFriendly(
             job.title as string,
             (job as { experience_required?: string }).experience_required ?? '',
@@ -84,13 +80,28 @@ router.post('/enrich-all', async (_req: Request, res: Response) => {
             salaryStr,
             description
           ),
-          aiProvider.mapCoursesToJob(
+          aiProvider.mapProgramsToJob(
             job.title as string,
-            [],
+            Array.isArray(jobSkills) ? jobSkills : [],
             description,
-            schoolsJson
+            programsCatalogJson
           ),
         ])
+
+        const conversion_score = await enrichmentService.conversionScoreAfterEnrichment(
+          {
+            title: job.title as string,
+            company: job.company as string,
+            skills: (job as { skills?: string[] | null }).skills ?? null,
+            salary_min: salaryMin,
+            salary_max: salaryMax,
+            is_fresher_friendly: fresherRes.isFresherFriendly,
+          },
+          job.company as string
+        )
+        console.log(
+          `[SCORING] Calculated score ${conversion_score} for ${String(job.company)} — ${String(job.title)}`
+        )
 
         // Update only columns that exist in the jobs table
         const { error: updateError } = await supabase
@@ -100,25 +111,45 @@ router.post('/enrich-all', async (_req: Request, res: Response) => {
             has_red_flags: redFlagRes.hasRedFlags,
             red_flags: redFlagRes.flags,
             enriched_at: new Date().toISOString(), // marks as enriched
+            conversion_score,
           })
           .eq('id', job.id as string)
 
         if (updateError) throw updateError
 
-        // Upsert school mappings into the normalized table (NOT into jobs)
-        if (courseRes.courses.length > 0) {
-          const mappings = courseRes.courses.map((school) => ({
-            job_id: job.id as string,
-            school_code: school,
-            confidence: courseRes.confidence[school] ?? 0,
-            reasoning: courseRes.reasoning,
-          }))
-          const { error: mappingError } = await supabase
-            .from('job_course_mappings')
-            .upsert(mappings, { onConflict: 'job_id,school_code' })
+        const validProgramIds = programRes.programs.filter((pid) => !!getProgramById(pid))
 
-          if (mappingError) {
-            console.error('[enrich-all] mapping upsert error:', mappingError.message)
+        // Replace programme mappings for this job (program-level is source of truth after enrich)
+        if (validProgramIds.length > 0) {
+          const { error: delErr } = await supabase
+            .from('job_course_mappings')
+            .delete()
+            .eq('job_id', job.id as string)
+          if (delErr) console.error('[enrich-all] mapping delete error:', delErr.message)
+
+          const rows = validProgramIds
+            .map((pid) => {
+              const meta = getProgramById(pid)
+              if (!meta) return null
+              return {
+                job_id: job.id as string,
+                school_code: meta.school_code,
+                program_id: pid,
+                school_name: null as string | null,
+                confidence: programRes.confidence[pid] ?? 0.75,
+                reasoning: programRes.reasoning,
+              }
+            })
+            .filter(Boolean) as Record<string, unknown>[]
+
+          if (rows.length > 0) {
+            const { error: mappingError } = await supabase
+              .from('job_course_mappings')
+              .upsert(rows, { onConflict: 'job_id,school_code,program_id' })
+
+            if (mappingError) {
+              console.error('[enrich-all] mapping upsert error:', mappingError.message)
+            }
           }
         }
 

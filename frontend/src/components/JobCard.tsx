@@ -6,6 +6,8 @@ import SendToOfficerModal from './SendToOfficerModal'
 interface JobCardProps {
   job: Job
   course_mappings: JobCourseMapping[]
+  /** Maps programme id → display name from GET /api/jobs/programs */
+  programNameById?: Record<string, string>
   isSelected?: boolean
   onSelect?: (id: string) => void
   /** Legacy callback — if provided the parent controls the send flow */
@@ -79,6 +81,7 @@ function relativeDate(dateStr: string | null): string {
 export default function JobCard({
   job,
   course_mappings,
+  programNameById = {},
   isSelected = false,
   onSelect,
   onSendToOfficer,
@@ -159,16 +162,25 @@ export default function JobCard({
       {/* School badges */}
       {course_mappings.length > 0 && (
         <div className="px-4 pb-3 flex flex-wrap gap-1.5">
-          {course_mappings.map((m) => (
+          {course_mappings.map((m) => {
+            const pid = m.program_id ? String(m.program_id) : ''
+            const label =
+              pid && programNameById[pid]
+                ? programNameById[pid]
+                : pid
+                  ? pid
+                  : m.school_code
+            return (
             <span
               key={m.id}
-              className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-teal-50 text-teal-800 border border-teal-100"
+              className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-teal-50 text-teal-800 border border-teal-100 max-w-full"
               title={m.reasoning ?? undefined}
             >
-              {m.school_code}{' '}
-              <span className="ml-1 text-teal-600">{Math.round(m.confidence * 100)}%</span>
+              <span className="truncate">{label}</span>
+              <span className="ml-1 flex-shrink-0 text-teal-600">{Math.round(m.confidence * 100)}%</span>
             </span>
-          ))}
+            )
+          })}
         </div>
       )}
 

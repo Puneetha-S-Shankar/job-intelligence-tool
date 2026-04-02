@@ -4,6 +4,8 @@ import { supabase } from '../db/supabase'
 import type { Job } from '../types'
 import { searchJobs } from '../services/jobSearch'
 import type { SearchFilters } from '../services/jobSearch'
+import { calculateConversionScore, fetchCompanyScoringStats } from '../services/scoringService'
+import { RVU_PROGRAMS } from '../data/programs'
 
 const router = Router()
 
@@ -57,9 +59,21 @@ router.get('/daily-digest', async (_req: Request, res: Response) => {
 })
 
 // ---------------------------------------------------------------------------
+// GET /api/jobs/programs — canonical programme list for UI filters
+// ---------------------------------------------------------------------------
+router.get('/programs', (_req: Request, res: Response) => {
+  const programs = RVU_PROGRAMS.map((p) => ({
+    id: p.id,
+    school_code: p.school_code,
+    name: p.name,
+  }))
+  return res.json({ programs })
+})
+
+// ---------------------------------------------------------------------------
 // GET /api/jobs/search
 // Layer 1: DB query + live SERP API results, merged and deduplicated.
-// Supports: schools, location (comma-sep), company, minScore, jobType,
+// Supports: schools, programs (optional), location (comma-sep), company, minScore, jobType,
 //           salary_min, salary_max, posted (7d|30d|all), fresherOnly,
 //           page, perPage, sort (score|date|salary)
 //
@@ -134,6 +148,19 @@ router.post('/', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'title and company are required' })
     }
 
+    const companyStats = await fetchCompanyScoringStats(body.company)
+    const conversion_score = calculateConversionScore(
+      {
+        company: body.company,
+        title: body.title,
+        skills: body.skills ?? null,
+        salary_min: body.salary_min ?? null,
+        salary_max: body.salary_max ?? null,
+        is_fresher_friendly: body.is_fresher_friendly ?? false,
+      },
+      companyStats
+    )
+
     const { data, error } = await supabase
       .from('jobs')
       .insert({
@@ -149,7 +176,7 @@ router.post('/', async (req: Request, res: Response) => {
         source_url: body.source_url ?? null,
         source: body.source ?? null,
         is_fresher_friendly: body.is_fresher_friendly ?? false,
-        conversion_score: body.conversion_score ?? 0,
+        conversion_score,
         has_red_flags: false,
         red_flags: null,
         posted_date: body.posted_date ?? null,

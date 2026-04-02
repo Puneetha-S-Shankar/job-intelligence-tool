@@ -22,6 +22,8 @@ export interface RawJob {
 export interface SearchFilters {
   query?: string;
   schools?: string;        // comma-separated school codes e.g. "CSE,MBA"
+  /** Optional comma-separated programme ids from /api/jobs/programs */
+  programs?: string;
   location?: string;       // comma-separated e.g. "Bangalore,Hyderabad"
   company?: string;
   minScore?: string;       // numeric string

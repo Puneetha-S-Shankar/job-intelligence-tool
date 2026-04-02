@@ -1,6 +1,10 @@
 import axios from "axios";
 import { supabase } from "../../db/supabase";
 import type { RawJob, SearchFilters } from "./types";
+import {
+  aggregateSerpQueriesForSchools,
+  serpQueriesForProgramIds,
+} from "../../data/programs";
 
 // ─── SCHOOL → SEARCH QUERY MAPPING ───────────────────────────────────────────
 // Maps RVU school codes to relevant fresher job search terms.
@@ -41,14 +45,13 @@ const SCHOOL_QUERY_MAP: Record<string, string[]> = {
     "fresher social media executive bangalore",
     "fresher communications associate bangalore",
   ],
-  // School of Engineering, Physics & Chemistry
+  // School of Economics & Public Policy (aligned with seed / programmes catalogue)
   SoEPP: [
-    "fresher electronics engineer bangalore",
-    "fresher embedded systems bangalore",
-    "fresher VLSI engineer bangalore",
-    "fresher mechanical engineer bangalore",
-    "fresher chemical engineer bangalore",
-    "fresher electrical engineer bangalore",
+    "fresher economics analyst bangalore",
+    "fresher policy analyst bangalore",
+    "fresher financial analyst bangalore",
+    "fresher research analyst bangalore",
+    "fresher data analyst economics bangalore",
   ],
   // School of Law
   SoL: [
@@ -72,14 +75,12 @@ const SCHOOL_QUERY_MAP: Record<string, string[]> = {
     "fresher medical technologist bangalore",
     "fresher hospital administrator bangalore",
   ],
-  // School of Commerce, Economics & Policy Studies
+  // School for Continuing Education & Professional Studies
   SCEPS: [
-    "fresher economics analyst bangalore",
-    "fresher financial analyst bangalore",
-    "fresher research analyst bangalore",
-    "fresher policy analyst bangalore",
-    "fresher accountant bangalore",
-    "fresher CA trainee bangalore",
+    "fresher executive trainee bangalore",
+    "fresher management trainee bangalore",
+    "fresher professional development bangalore",
+    "fresher operations trainee bangalore",
   ],
 };
 
@@ -158,9 +159,12 @@ function normalizeSerpJob(raw: Record<string, any>): RawJob | null {
   };
 }
 
+function localizeQuery(q: string, loc: string): string {
+  return q.replace(/\bbangalore\b/gi, loc);
+}
+
 // ─── RESOLVE SCHOOL CODES → QUERIES ──────────────────────────────────────────
-// When schools filter is applied, resolve their courses from DB curriculum
-// to build relevant SERP queries. Falls back to static map if DB lookup fails.
+// Programme catalogue stems + DB curriculum programmes + static per-school map.
 
 async function resolveQueriesForSchools(
   schoolCodes: string[],
@@ -168,7 +172,10 @@ async function resolveQueriesForSchools(
 ): Promise<string[]> {
   const queries = new Set<string>();
 
-  // Try to get curriculum from DB for richer keyword expansion
+  for (const stem of aggregateSerpQueriesForSchools(schoolCodes)) {
+    queries.add(`${stem} ${baseLocation}`);
+  }
+
   try {
     const { data: uni } = await supabase
       .from("universities")
@@ -177,32 +184,31 @@ async function resolveQueriesForSchools(
       .single();
 
     if (uni?.curriculum) {
-      const curriculum = uni.curriculum as Record<string, any>;
+      const root = uni.curriculum as {
+        schools?: Array<{ code: string; programmes?: string[]; courses?: string[] }>;
+      };
+      const list = root.schools ?? [];
       for (const code of schoolCodes) {
-        const school = curriculum[code];
-        if (school?.courses) {
-          for (const course of school.courses as string[]) {
-            queries.add(`fresher ${course.toLowerCase()} ${baseLocation}`);
-          }
+        const school = list.find((s) => s.code === code);
+        const courses = school?.programmes ?? school?.courses ?? [];
+        for (const course of courses) {
+          queries.add(`fresher ${String(course).toLowerCase()} ${baseLocation}`);
         }
       }
     }
   } catch {
-    // DB lookup failed — fall back to static map below
+    /* ignore */
   }
 
-  // Always supplement with static map entries.
-  // Match directly on code — keys are RVU-format (SoCSE, SoB, …), not uppercase.
   for (const code of schoolCodes) {
     const staticQueries = SCHOOL_QUERY_MAP[code];
     if (staticQueries) {
-      for (const q of staticQueries) queries.add(q);
+      for (const q of staticQueries) queries.add(localizeQuery(q, baseLocation));
     }
   }
 
-  // If nothing resolved, use defaults
   if (queries.size === 0) {
-    for (const q of DEFAULT_QUERIES) queries.add(q);
+    for (const q of DEFAULT_QUERIES) queries.add(localizeQuery(q, baseLocation));
   }
 
   return [...queries];
@@ -272,14 +278,25 @@ export async function searchLinkedInJobs(filters: SearchFilters): Promise<RawJob
 
   const baseLocation = filters.location?.split(",")[0]?.trim() || "Bangalore";
 
-  // Resolve queries based on school filter or use defaults
   const schoolCodes = filters.schools
-    ? filters.schools.split(",").map(s => s.trim()).filter(Boolean)
+    ? filters.schools.split(",").map((s) => s.trim()).filter(Boolean)
+    : [];
+  const programIds = filters.programs
+    ? filters.programs.split(",").map((s) => s.trim()).filter(Boolean)
     : [];
 
-  const queries = schoolCodes.length > 0
-    ? await resolveQueriesForSchools(schoolCodes, baseLocation)
-    : DEFAULT_QUERIES;
+  let queries: string[];
+  if (programIds.length > 0) {
+    const stems = serpQueriesForProgramIds(programIds);
+    queries =
+      stems.length > 0
+        ? stems.map((stem) => `${stem} ${baseLocation}`)
+        : DEFAULT_QUERIES.map((q) => localizeQuery(q, baseLocation));
+  } else if (schoolCodes.length > 0) {
+    queries = await resolveQueriesForSchools(schoolCodes, baseLocation);
+  } else {
+    queries = DEFAULT_QUERIES.map((q) => localizeQuery(q, baseLocation));
+  }
 
   // Build date chip: if posted filter is applied, match it
   let dateChip = "date_posted:month";

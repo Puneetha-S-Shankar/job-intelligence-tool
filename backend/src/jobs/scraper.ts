@@ -2,6 +2,10 @@ import { chromium, Browser, Page } from "playwright";
 import axios from "axios";
 import * as cheerio from "cheerio";
 import { supabase } from "../db/supabase";
+import {
+  calculateConversionScore,
+  fetchCompanyScoringStats,
+} from "../services/scoringService";
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
 
@@ -184,10 +188,26 @@ async function saveJob(job: RawJob, universityId: string): Promise<boolean> {
 
     const salary = parseSalary(job.salary || "");
     const skills = job.skills || extractSkills(job.description || "");
+    const companyTrim = job.company.trim();
+    const companyStats = await fetchCompanyScoringStats(companyTrim);
+    const conversion_score = calculateConversionScore(
+      {
+        company: companyTrim,
+        title: job.title.trim(),
+        skills,
+        salary_min: salary.min,
+        salary_max: salary.max,
+        is_fresher_friendly: true,
+      },
+      companyStats
+    );
+    console.log(
+      `[SCORING] Calculated score ${conversion_score} for ${companyTrim} — ${job.title.trim()}`
+    );
 
     await supabase.from("jobs").insert({
       title: job.title.trim(),
-      company: job.company.trim(),
+      company: companyTrim,
       location: normalizeLocation(job.location || "Bangalore"),
       description: job.description || "",
       experience_required: job.experienceRequired || "0-1 years",
@@ -198,7 +218,7 @@ async function saveJob(job: RawJob, universityId: string): Promise<boolean> {
       source: job.source,
       job_type: job.jobType || "fulltime",
       is_fresher_friendly: true,
-      conversion_score: 50,
+      conversion_score,
       posted_date: job.postedDate?.toISOString() || new Date().toISOString(),
       is_active: true,
       university_id: universityId,

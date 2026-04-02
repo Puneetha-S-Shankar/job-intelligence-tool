@@ -1,7 +1,9 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useDailyDigest } from '../hooks/useJobs'
 import JobCard from '../components/JobCard'
 import SendToOfficerModal from '../components/SendToOfficerModal'
+import api from '../lib/api'
 
 // ---------------------------------------------------------------------------
 // Loading skeleton
@@ -31,6 +33,20 @@ function JobSkeleton() {
 // ---------------------------------------------------------------------------
 export default function DailyDigest() {
   const { data: jobs, isLoading, error, refetch } = useDailyDigest()
+  const { data: programsCatalog = [] } = useQuery({
+    queryKey: ['jobs-programs-catalog'],
+    queryFn: async () => {
+      const res = await api.get<{ programs: { id: string; name: string }[] }>('/jobs/programs')
+      return res.data.programs
+    },
+    staleTime: 1000 * 60 * 60,
+  })
+  const programNameById = useMemo(() => {
+    const m: Record<string, string> = {}
+    for (const p of programsCatalog) m[p.id] = p.name
+    return m
+  }, [programsCatalog])
+
   const [selectedJobIds, setSelectedJobIds] = useState<Set<string>>(new Set())
   const [showModal, setShowModal] = useState(false)
 
@@ -169,6 +185,7 @@ export default function DailyDigest() {
               key={job.id}
               job={job}
               course_mappings={job.job_course_mappings}
+              programNameById={programNameById}
               isSelected={selectedJobIds.has(job.id)}
               onSelect={toggleSelect}
               onSendToOfficer={(id) => {

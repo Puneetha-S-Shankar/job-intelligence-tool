@@ -1,4 +1,6 @@
 import type { DBJob, RawJob } from "./types";
+import { calculateConversionScore } from "../scoringService";
+import { getProgramById } from "../../data/programs";
 
 // ─── MERGE SERVICE ────────────────────────────────────────────────────────────
 // Deduplicates and merges DB jobs + live SERP RawJobs into a single sorted list.
@@ -21,21 +23,80 @@ function rawJobToDBJob(
   raw: RawJob,
   idx: number,
   schoolCodes: string[],
+  programIds: string[],
   realId: string | null
 ): DBJob {
   const jobId = realId ?? `live_${idx}`;
   const isLive = !realId;
   const now = new Date().toISOString();
 
-  const job_course_mappings = schoolCodes.map((code, ci) => ({
-    id: `${jobId}_${ci}`,
-    job_id: jobId,
-    school_code: code,
-    school_name: null,
-    confidence: 0.5,
-    reasoning: "Matched via live SERP search for this school",
-    created_at: now,
-  }));
+  type MappingRow = {
+    id: string;
+    job_id: string;
+    school_code: string;
+    program_id: string;
+    school_name: null;
+    confidence: number;
+    reasoning: string;
+    created_at: string;
+  };
+
+  let job_course_mappings: MappingRow[];
+
+  if (programIds.length > 0) {
+    const rows: MappingRow[] = [];
+    let ci = 0;
+    for (const pid of programIds) {
+      const meta = getProgramById(pid);
+      if (!meta) continue;
+      rows.push({
+        id: `${jobId}_${ci}_${pid}`,
+        job_id: jobId,
+        school_code: meta.school_code,
+        program_id: pid,
+        school_name: null,
+        confidence: 0.55,
+        reasoning: "Matched via live SERP search for this programme",
+        created_at: now,
+      });
+      ci++;
+    }
+    if (rows.length > 0) {
+      job_course_mappings = rows;
+    } else {
+      job_course_mappings = schoolCodes.map((code, i) => ({
+        id: `${jobId}_${i}`,
+        job_id: jobId,
+        school_code: code,
+        program_id: "",
+        school_name: null,
+        confidence: 0.5,
+        reasoning: "Matched via live SERP search for this school",
+        created_at: now,
+      }));
+    }
+  } else {
+    job_course_mappings = schoolCodes.map((code, ci) => ({
+      id: `${jobId}_${ci}`,
+      job_id: jobId,
+      school_code: code,
+      program_id: "",
+      school_name: null,
+      confidence: 0.5,
+      reasoning: "Matched via live SERP search for this school",
+      created_at: now,
+    }));
+  }
+
+  const skills = raw.skills ?? [];
+  const conversion_score = calculateConversionScore({
+    company: raw.company,
+    title: raw.title,
+    skills,
+    salary_min: null,
+    salary_max: null,
+    is_fresher_friendly: true,
+  });
 
   return {
     id: jobId,
@@ -49,10 +110,10 @@ function rawJobToDBJob(
     job_type: raw.jobType ?? "fulltime",
     salary_min: null,
     salary_max: null,
-    skills: raw.skills ?? [],
+    skills,
     experience_required: raw.experienceRequired ?? "0-1 years",
     is_fresher_friendly: true,
-    conversion_score: 40,
+    conversion_score,
     posted_date: raw.postedDate?.toISOString() ?? now,
     is_active: true,
     _isLive: isLive,
@@ -73,7 +134,8 @@ export function mergeAndDedupe(
   dbJobs: DBJob[],
   liveJobs: RawJob[],
   schoolCodes: string[] = [],
-  savedIds: (string | null)[] = []
+  savedIds: (string | null)[] = [],
+  programIds: string[] = []
 ): MergeResult {
   // Build a set of dedup keys from DB jobs (they're ground truth)
   const seen = new Set<string>();
@@ -101,7 +163,7 @@ export function mergeAndDedupe(
     seen.add(key);
     if (raw.sourceUrl) seenUrls.add(raw.sourceUrl);
 
-    liveDBJobs.push(rawJobToDBJob(raw, i, schoolCodes, realId));
+    liveDBJobs.push(rawJobToDBJob(raw, i, schoolCodes, programIds, realId));
     liveCount++;
   }
 

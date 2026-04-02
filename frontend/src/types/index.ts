@@ -30,6 +30,8 @@ export interface JobCourseMapping {
   id: string
   job_id: string
   school_code: string
+  /** Set when mapped to a specific programme; omit or empty for school-only rows */
+  program_id?: string | null
   school_name: string | null
   confidence: number
   reasoning: string | null
@@ -206,6 +208,8 @@ export interface OfficerUser {
 export interface JobFilters {
   /** Comma-separated school codes, filtered via job_course_mappings */
   schools?: string
+  /** Optional comma-separated programme ids (narrows DB + SERP) */
+  programs?: string
   /** Comma-separated locations (ILIKE OR match) */
   location?: string
   company?: string

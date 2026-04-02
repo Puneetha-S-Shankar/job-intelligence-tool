@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { supabase } from '../db/supabase'
+import { getProgramById } from '../data/programs'
 import {
   generateEmailTemplate,
   generateCallScript,
@@ -35,7 +36,17 @@ router.post('/email', async (req: Request, res: Response) => {
     .eq('id', (officer as { university_id: string }).university_id)
     .maybeSingle()
 
-  const courses: string[] = (job as { schools?: string[] }).schools ?? []
+  const { data: mappings } = await supabase
+    .from('job_course_mappings')
+    .select('school_code, program_id')
+    .eq('job_id', jobId)
+
+  const courses =
+    mappings?.map((m) => {
+      const pid = m.program_id as string
+      if (pid) return getProgramById(pid)?.name ?? pid
+      return m.school_code as string
+    }) ?? []
 
   try {
     const template = await generateEmailTemplate(
@@ -75,10 +86,15 @@ router.post('/call-script', async (req: Request, res: Response) => {
 
   const { data: mappings } = await supabase
     .from('job_course_mappings')
-    .select('school_code')
+    .select('school_code, program_id')
     .eq('job_id', jobId)
 
-  const courses = mappings?.map((m) => m.school_code) ?? []
+  const courses =
+    mappings?.map((m) => {
+      const pid = m.program_id as string
+      if (pid) return getProgramById(pid)?.name ?? pid
+      return m.school_code as string
+    }) ?? []
 
   try {
     const result = await generateCallScript(

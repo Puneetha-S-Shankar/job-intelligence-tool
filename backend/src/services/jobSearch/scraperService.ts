@@ -7,6 +7,49 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 import { supabase } from "../../db/supabase";
 import type { RawJob } from "./types";
+import {
+  calculateConversionScore,
+  fetchCompanyScoringStats,
+} from "../scoringService";
+import { getProgramById } from "../../data/programs";
+
+function buildJobCourseMappingRows(
+  jobId: string,
+  schoolCodes: string[],
+  programIds: string[]
+): Array<{
+  job_id: string;
+  school_code: string;
+  program_id: string;
+  school_name: string | null;
+  confidence: number;
+  reasoning: string;
+}> {
+  if (programIds.length > 0) {
+    const rows: ReturnType<typeof buildJobCourseMappingRows> = [];
+    for (const pid of programIds) {
+      const meta = getProgramById(pid);
+      if (!meta) continue;
+      rows.push({
+        job_id: jobId,
+        school_code: meta.school_code,
+        program_id: pid,
+        school_name: null,
+        confidence: 0.55,
+        reasoning: "Matched via live SERP search for this programme",
+      });
+    }
+    if (rows.length > 0) return rows;
+  }
+  return schoolCodes.map((code) => ({
+    job_id: jobId,
+    school_code: code,
+    program_id: "",
+    school_name: null,
+    confidence: 0.5,
+    reasoning: "Matched via SERP live search for this school",
+  }));
+}
 
 // ── Re-export CompanyRow shape (used by scheduler) ───────────────────────────
 export interface CompanyRow {
@@ -171,7 +214,8 @@ async function autoAddCompany(
 export async function saveJob(
   job: RawJob,
   universityId: string,
-  schoolCodes: string[] = []
+  schoolCodes: string[] = [],
+  programIds: string[] = []
 ): Promise<boolean> {
   try {
     if (job.sourceUrl && await jobExists(job.sourceUrl)) return false;
@@ -183,12 +227,28 @@ export async function saveJob(
 
     const salary = parseSalary(job.salary || "");
     const skills = job.skills || extractSkills(job.description || "");
+    const companyTrim = job.company.trim();
+    const companyStats = await fetchCompanyScoringStats(companyTrim);
+    const conversion_score = calculateConversionScore(
+      {
+        company: companyTrim,
+        title: job.title.trim(),
+        skills,
+        salary_min: salary.min,
+        salary_max: salary.max,
+        is_fresher_friendly: true,
+      },
+      companyStats
+    );
+    console.log(
+      `[SCORING] Calculated score ${conversion_score} for ${companyTrim} — ${job.title.trim()}`
+    );
 
     const { data: inserted, error: insertError } = await supabase
       .from("jobs")
       .insert({
         title: job.title.trim(),
-        company: job.company.trim(),
+        company: companyTrim,
         location: normalizeLocation(job.location || "Bangalore"),
         description: job.description || "",
         experience_required: job.experienceRequired || "0-1 years",
@@ -199,7 +259,7 @@ export async function saveJob(
         source: sourceForJobsTable(job.source),
         job_type: job.jobType || "fulltime",
         is_fresher_friendly: true,
-        conversion_score: 50,
+        conversion_score,
         posted_date: job.postedDate?.toISOString() || new Date().toISOString(),
         is_active: true,
         university_id: universityId,
@@ -210,20 +270,15 @@ export async function saveJob(
 
     if (insertError) throw insertError;
 
-    // Persist school mappings so future DB searches by school find this job
-    if (inserted?.id && schoolCodes.length > 0) {
-      const mappings = schoolCodes.map(code => ({
-        job_id: inserted.id as string,
-        school_code: code,
-        school_name: null as string | null,
-        confidence: 0.5,
-        reasoning: "Matched via SERP live search for this school",
-      }));
-      const { error: mappingError } = await supabase
-        .from("job_course_mappings")
-        .upsert(mappings, { onConflict: "job_id,school_code" });
-      if (mappingError) {
-        console.error(`[SAVE] Failed to save school mappings for "${job.title}":`, mappingError.message);
+    if (inserted?.id) {
+      const mappings = buildJobCourseMappingRows(inserted.id as string, schoolCodes, programIds);
+      if (mappings.length > 0) {
+        const { error: mappingError } = await supabase
+          .from("job_course_mappings")
+          .upsert(mappings, { onConflict: "job_id,school_code,program_id" });
+        if (mappingError) {
+          console.error(`[SAVE] Failed to save school mappings for "${job.title}":`, mappingError.message);
+        }
       }
     }
 
@@ -244,7 +299,8 @@ export async function saveJob(
 export async function saveJobGetId(
   job: RawJob,
   universityId: string,
-  schoolCodes: string[] = []
+  schoolCodes: string[] = [],
+  programIds: string[] = []
 ): Promise<string | null> {
   try {
     const effectiveUrl =
@@ -285,12 +341,28 @@ export async function saveJobGetId(
     // Insert new job and capture its ID
     const salary = parseSalary(job.salary || "");
     const skills = job.skills || extractSkills(job.description || "");
+    const companyTrim = job.company.trim();
+    const companyStats = await fetchCompanyScoringStats(companyTrim);
+    const conversion_score = calculateConversionScore(
+      {
+        company: companyTrim,
+        title: job.title.trim(),
+        skills,
+        salary_min: salary.min,
+        salary_max: salary.max,
+        is_fresher_friendly: true,
+      },
+      companyStats
+    );
+    console.log(
+      `[SCORING] Calculated score ${conversion_score} for ${companyTrim} — ${job.title.trim()}`
+    );
 
     const { data: inserted, error: insertError } = await supabase
       .from("jobs")
       .insert({
         title: job.title.trim(),
-        company: job.company.trim(),
+        company: companyTrim,
         location: normalizeLocation(job.location || "Bangalore"),
         description: job.description || "",
         experience_required: job.experienceRequired || "0-1 years",
@@ -301,7 +373,7 @@ export async function saveJobGetId(
         source: sourceForJobsTable(job.source),
         job_type: job.jobType || "fulltime",
         is_fresher_friendly: true,
-        conversion_score: 50,
+        conversion_score,
         posted_date: job.postedDate?.toISOString() || new Date().toISOString(),
         is_active: true,
         university_id: universityId,
@@ -330,18 +402,11 @@ export async function saveJobGetId(
 
     const realId = inserted.id as string;
 
-    // Save school mappings so future DB school-filtered searches find this job
-    if (schoolCodes.length > 0) {
-      const mappings = schoolCodes.map(code => ({
-        job_id: realId,
-        school_code: code,
-        school_name: null as string | null,
-        confidence: 0.5,
-        reasoning: "Matched via SERP live search for this school",
-      }));
+    const mappings = buildJobCourseMappingRows(realId, schoolCodes, programIds);
+    if (mappings.length > 0) {
       const { error: mappingError } = await supabase
         .from("job_course_mappings")
-        .upsert(mappings, { onConflict: "job_id,school_code" });
+        .upsert(mappings, { onConflict: "job_id,school_code,program_id" });
       if (mappingError) {
         console.error(`[SAVE] School mapping error for "${job.title}":`, mappingError.message);
       }
