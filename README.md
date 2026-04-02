@@ -4,6 +4,8 @@ A full-stack placement intelligence platform for RVU Placements. Combines **Supa
 
 ---
 
+
+//old version//
 ## Tech Stack
 
 | Layer    | Technologies |
